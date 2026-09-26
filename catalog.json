@@ -1,21 +1,30 @@
 {
-  "store_version": "1.0",
+  "version": 1,
+  "updated_at": "2026-01-15",
   "plugins": [
     {
-      "id": "calculator_plugin",
-      "name": "Продвинутый калькулятор",
+      "id": "weather",
+      "name": "Погода",
+      "author": "Deskify",
+      "description": "Показывает погоду в вашем городе через Open-Meteo.",
       "version": "1.0.0",
-      "description": "Добавляет математические функции",
-      "author": "DevUser",
-      "download_url": "https://raw.githubusercontent.com/username/repo/main/plugins/calculator.py"
+      "icon": "🌤",
+      "url": "https://raw.githubusercontent.com/deskify/Plugins/main/weather.py",
+      "file": "plugin_weather.py",
+      "tags": ["интернет", "погода"],
+      "requires_requests": false
     },
     {
-      "id": "weather_plugin",
-      "name": "Виджет погоды",
-      "version": "1.2.0",
-      "description": "Показывает погоду в реальном времени",
-      "author": "WeatherFan",
-      "download_url": "https://raw.githubusercontent.com/username/repo/main/plugins/weather.py"
+      "id": "currency",
+      "name": "Курсы валют",
+      "author": "Deskify",
+      "description": "Курсы ЦБ РФ на сегодня.",
+      "version": "1.0.0",
+      "icon": "💱",
+      "url": "https://raw.githubusercontent.com/deskify/Plugins/main/currency.py",
+      "file": "plugin_currency.py",
+      "tags": ["интернет", "финансы"],
+      "requires_requests": false
     }
   ]
 }
