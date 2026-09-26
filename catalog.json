@@ -1,0 +1,21 @@
+{
+  "store_version": "1.0",
+  "plugins": [
+    {
+      "id": "calculator_plugin",
+      "name": "Продвинутый калькулятор",
+      "version": "1.0.0",
+      "description": "Добавляет математические функции",
+      "author": "DevUser",
+      "download_url": "https://raw.githubusercontent.com/username/repo/main/plugins/calculator.py"
+    },
+    {
+      "id": "weather_plugin",
+      "name": "Виджет погоды",
+      "version": "1.2.0",
+      "description": "Показывает погоду в реальном времени",
+      "author": "WeatherFan",
+      "download_url": "https://raw.githubusercontent.com/username/repo/main/plugins/weather.py"
+    }
+  ]
+}
