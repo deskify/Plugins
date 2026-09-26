@@ -1,29 +1,49 @@
 {
-  "version": 1,
-  "updated_at": "2026-01-15",
+  "version": 2,
+  "updated_at": "2026-09-26",
   "plugins": [
+    {
+      "id": "store",
+      "name": "Магазин плагинов",
+      "author": "Deskify",
+      "description": "Встроенный магазин: загружает каталог плагинов из этого репозитория и устанавливает их в один клик.",
+      "version": "1.1.0",
+      "icon": "🛒",
+      "file": "plugin_store.py",
+      "tags": ["интернет", "инструменты", "система"],
+      "requires_requests": false
+    },
+    {
+      "id": "json_form",
+      "name": "JSON-форма",
+      "author": "Deskify",
+      "description": "Конструктор форм: текстовые поля, числа, чекбоксы, списки. Отдаёт результат в виде JSON, копирует в буфер, сохраняет в файл или отправляет в блокнот.",
+      "version": "1.0.0",
+      "icon": "🧾",
+      "file": "plugin_json_form.py",
+      "tags": ["инструменты", "json", "формы"],
+      "requires_requests": false
+    },
+    {
+      "id": "stickers",
+      "name": "Стикеры",
+      "author": "Deskify",
+      "description": "Создавайте цветные стикеры с текстом, закрепляйте их поверх всех окон и держите важное на виду. Стикеры сохраняются между запусками.",
+      "version": "1.0.0",
+      "icon": "📌",
+      "file": "plugin_stickers.py",
+      "tags": ["продуктивность", "заметки", "инструменты"],
+      "requires_requests": false
+    },
     {
       "id": "weather",
       "name": "Погода",
       "author": "Deskify",
-      "description": "Показывает погоду в вашем городе через Open-Meteo.",
+      "description": "Показывает текущую погоду в выбранном городе через Open-Meteo (без API-ключа).",
       "version": "1.0.0",
       "icon": "🌤",
-      "url": "https://raw.githubusercontent.com/deskify/Plugins/main/weather.py",
-      "file": "plugin_weather.py",
+      "file": "weather.py",
       "tags": ["интернет", "погода"],
-      "requires_requests": false
-    },
-    {
-      "id": "currency",
-      "name": "Курсы валют",
-      "author": "Deskify",
-      "description": "Курсы ЦБ РФ на сегодня.",
-      "version": "1.0.0",
-      "icon": "💱",
-      "url": "https://raw.githubusercontent.com/deskify/Plugins/main/currency.py",
-      "file": "plugin_currency.py",
-      "tags": ["интернет", "финансы"],
       "requires_requests": false
     }
   ]
