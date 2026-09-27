@@ -6,6 +6,9 @@
 Если в catalog.json указано поле sha256 — оно игнорируется.
 Файл устанавливается как есть, без проверки целостности.
 
+Окно магазина поднимается поверх главного окна Deskify:
+transient + lift + focus_force + временный -topmost.
+
 Каталог по умолчанию: https://github.com/deskify/Plugins
 """
 
@@ -358,6 +361,9 @@ def _show_plugin_errors(api):
     win.title("⚠ Ошибки загрузки плагинов")
     win.geometry("700x460")
 
+    # поднять поверх
+    _raise_window(win, api["app"])
+
     box = api["ctk"].CTkTextbox(
         win, wrap="word",
         font=api["ctk"].CTkFont(family="Consolas", size=12)
@@ -376,6 +382,43 @@ def _show_plugin_errors(api):
 
     api["ctk"].CTkButton(win, text="Очистить лог", fg_color="#c0392b",
                          command=clear_log).pack(pady=(0, 12))
+
+
+# ============================================================
+#  Поднятие окна поверх главного
+# ============================================================
+
+def _raise_window(win, parent=None):
+    """
+    Гарантирует, что Toplevel окажется спереди:
+    transient + lift + focus_force + временный -topmost.
+    """
+    try:
+        if parent is not None:
+            win.transient(parent)
+    except Exception:
+        pass
+    try:
+        win.lift()
+    except Exception:
+        pass
+    try:
+        win.focus_force()
+    except Exception:
+        pass
+    try:
+        win.attributes("-topmost", True)
+        win.after(150, lambda: _safe_unset_topmost(win))
+    except Exception:
+        pass
+
+
+def _safe_unset_topmost(win):
+    try:
+        if win.winfo_exists():
+            win.attributes("-topmost", False)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -680,9 +723,9 @@ def _open_store_window(api):
     if win is not None:
         try:
             if win.winfo_exists():
+                # Поднять поверх, если окно уже открыто
                 win.deiconify()
-                win.lift()
-                win.focus_force()
+                _raise_window(win, api["app"])
                 return
         except Exception:
             pass
@@ -697,6 +740,9 @@ def _open_store_window(api):
     win.geometry("900x680")
     win.minsize(720, 540)
     _state["window"] = win
+
+    # === Поднять окно поверх главного окна Deskify ===
+    _raise_window(win, app)
 
     # Заголовок + статус
     top = ctk.CTkFrame(win, fg_color="transparent")
