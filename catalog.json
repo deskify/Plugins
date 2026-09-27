@@ -79,7 +79,6 @@
       "version": "0.0.3",
       "icon": "🎨",
       "file": "paint.py",
-      "sha256": "5e5dcd2f2922668535a938ab5a82f704c36f8d75c6cbd90a007faed6bd4eaca2",
       "tags": [
         "рисовалка"
       ]
@@ -92,7 +91,6 @@
       "version": "1.0.0",
       "icon": "🧾",
       "file": "guide.py",
-      "sha256": "02bfff5e08aa46667b761411957f24d337ae8c8b055ca95210f3f74972b4a9c7",
       "tags": [
         "гайды"
       ]
