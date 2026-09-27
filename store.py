@@ -894,4 +894,84 @@ def _open_store_window(api):
     tag_row = ctk.CTkFrame(win, fg_color="transparent")
     tag_row.pack(fill="x", padx=16, pady=(4, 4))
 
-    #
+    # Кнопки действий
+    btn_row = ctk.CTkFrame(win, fg_color="transparent")
+    btn_row.pack(fill="x", padx=16, pady=(2, 6))
+
+    refresh_btn = ctk.CTkButton(btn_row, text="🔄 Обновить каталог", width=170)
+    refresh_btn.pack(side="left", padx=(0, 6))
+    ctk.CTkButton(btn_row, text="♻ Перезагрузить плагины", width=190,
+                  fg_color="gray30",
+                  command=lambda: _reload_plugins(api)).pack(side="left", padx=3)
+    ctk.CTkButton(btn_row, text="📂 Из файла...", width=130, fg_color="gray30",
+                  command=lambda: _install_from_file(
+                      api,
+                      lambda: _render_plugins(api, list_frame,
+                                               _state.get("catalog", []),
+                                               "search"))
+                  ).pack(side="left", padx=3)
+    ctk.CTkButton(btn_row, text="⚠ Ошибки", width=100, fg_color="gray30",
+                  command=lambda: _show_plugin_errors(api)).pack(side="left", padx=3)
+    ctk.CTkButton(btn_row, text="🔗 Репозиторий", width=130, fg_color="gray30",
+                  command=lambda: _open_repo(api)).pack(side="left", padx=3)
+    ctk.CTkButton(btn_row, text="📁 Папка", width=90, fg_color="gray30",
+                  command=lambda: _open_plugins_folder(api)).pack(side="left", padx=3)
+    ctk.CTkButton(btn_row, text="❓", width=40, fg_color="gray30",
+                  command=lambda: _show_format_help(api)).pack(side="left", padx=3)
+
+    # Список
+    list_frame = ctk.CTkScrollableFrame(win, fg_color=("gray90", "gray15"))
+    list_frame.pack(fill="both", expand=True, padx=16, pady=(4, 12))
+    _state["list_frame"] = list_frame
+
+    def reload_catalog():
+        _render_loading(list_frame, ctk)
+        status_lbl.configure(text="Загрузка каталога...", text_color="gray60")
+        refresh_btn.configure(state="disabled")
+
+        # Перечитываем версии с диска — на случай, если что-то поменялось
+        _state["installed_versions"] = _load_installed_versions(api)
+
+        def worker():
+            plugins, source, err = _load_catalog(api)
+            _state["catalog"] = plugins or []
+            app.after(0, lambda: _render_tag_filter(api, tag_row, plugins, list_frame))
+            app.after(0, lambda: _render_plugins(api, list_frame, plugins, source))
+            app.after(0, lambda: refresh_btn.configure(state="normal"))
+            if source == "error" and err:
+                app.after(0, lambda: status_lbl.configure(
+                    text=f"✖ {err}", text_color="#e74c3c"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    refresh_btn.configure(command=reload_catalog)
+
+    def on_search_change(*_):
+        _render_plugins(api, list_frame, _state.get("catalog", []), "search")
+
+    search_var.trace_add("write", on_search_change)
+
+    reload_catalog()
+    win.protocol("WM_DELETE_WINDOW", lambda: _close_window(win))
+
+
+def _close_window(win):
+    try:
+        win.destroy()
+    except Exception:
+        pass
+    _state["window"] = None
+
+
+# ============================================================
+#  Точка входа
+# ============================================================
+
+def register(api):
+    _state["api"] = api
+    _state["app"] = api["app"]
+
+    api["add_plugin_button"](
+        "🛒 Магазин плагинов",
+        lambda: _open_store_window(api),
+    )
