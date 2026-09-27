@@ -61,7 +61,7 @@
       "id": "music",
       "name": "Музыкальный плеер",
       "author": "Deskify",
-      "description": "Музыкальный плеер",
+      "description": "Музыкальный плеер, если не скачивается обнови магазин",
       "version": "1.0.0",
       "icon": "🎵",
       "file": "music.py",
