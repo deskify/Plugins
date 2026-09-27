@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updated_at": "2026-09-26",
+  "updated_at": "2026-09-27",
   "plugins": [
     {
       "id": "store",
@@ -10,19 +10,11 @@
       "version": "1.2.0",
       "icon": "🛒",
       "file": "store.py",
-      "tags": ["интернет", "инструменты", "система"],
-      "requires_requests": false
-    },
-    {
-      "id": "json_form",
-      "name": "JSON-форма",
-      "author": "Deskify",
-      "description": "Конструктор форм: текстовые поля, числа, чекбоксы, списки. Отдаёт результат в виде JSON, копирует в буфер, сохраняет в файл или отправляет в блокнот.",
-      "version": "1.0.0",
-      "icon": "🧾",
-      "file": "json.py",
-      "tags": ["инструменты", "json", "формы"],
-      "requires_requests": false
+      "tags": [
+        "интернет",
+        "инструменты",
+        "система"
+      ]
     },
     {
       "id": "stickers",
@@ -32,8 +24,11 @@
       "version": "1.0.0",
       "icon": "📌",
       "file": "stickers.py",
-      "tags": ["продуктивность", "заметки", "инструменты"],
-      "requires_requests": false
+      "tags": [
+        "продуктивность",
+        "заметки",
+        "инструменты"
+      ]
     },
     {
       "id": "weather",
@@ -43,8 +38,79 @@
       "version": "1.0.0",
       "icon": "🌤",
       "file": "weather.py",
-      "tags": ["интернет", "погода"],
-      "requires_requests": false
+      "tags": [
+        "интернет",
+        "погода"
+      ]
+    },
+    {
+      "id": "word",
+      "name": "Редактор текста",
+      "author": "Deskify",
+      "description": "более удобный редакор текста",
+      "version": "1.0.0",
+      "icon": "📄",
+      "file": "notepad.py",
+      "sha256": "f4f28b2c360576dbe937195a904824ad73677378a713ee4aad76f99e3f4c2b84",
+      "tags": [
+        "работа",
+        "текст"
+      ]
+    },
+    {
+      "id": "music",
+      "name": "Музыкальный плеер",
+      "author": "Deskify",
+      "description": "Музыкальный плеер",
+      "version": "1.0.0",
+      "icon": "🎵",
+      "file": "music.py",
+      "sha256": "ba0bc5affeb8438dd7b81a32b777a5af716b706971f4ce9f25cb14ecf7ef20b5",
+      "tags": [
+        "музыка",
+        "отдых",
+        "довольный негр"
+      ]
+    },
+    {
+      "id": "paint",
+      "name": "Paint",
+      "author": "Artur Galyautdinov",
+      "description": "Paint - рисовать. Этим все сказано",
+      "version": "0.0.2",
+      "icon": "🎨",
+      "file": "paint.py",
+      "sha256": "5e5dcd2f2922668535a938ab5a82f704c36f8d75c6cbd90a007faed6bd4eaca2",
+      "tags": [
+        "рисовалка"
+      ]
+    },
+    {
+      "id": "guide",
+      "name": "Руководство по использованию",
+      "author": "Deskify",
+      "description": "Инструкция как использовать Deskify WorkSpace",
+      "version": "1.0.0",
+      "icon": "🧾",
+      "file": "guide.py",
+      "sha256": "02bfff5e08aa46667b761411957f24d337ae8c8b055ca95210f3f74972b4a9c7",
+      "tags": [
+        "гайды"
+      ]
+    },
+    {
+      "id": "json_form",
+      "name": "JSON-форма",
+      "author": "Deskify",
+      "description": "Конструктор форм: текстовые поля, числа, чекбоксы, списки. Отдаёт результат в виде JSON, копирует в буфер, сохраняет в файл или отправляет в блокнот.",
+      "version": "1.0.0",
+      "icon": "🧾",
+      "file": "json.py",
+      "tags": [
+        "инструменты",
+        "json",
+        "формы"
+      ]
     }
   ]
 }
