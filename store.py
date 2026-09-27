@@ -2,12 +2,20 @@
 """
 Магазин плагинов Deskify.
 
-ВАЖНО: sha256 НЕ проверяется.
-Если в catalog.json указано поле sha256 — оно игнорируется.
-Файл устанавливается как есть, без проверки целостности.
+Возможности:
+  - загрузка каталога из raw-URL GitHub с фолбэком в кэш;
+  - установка / обновление / удаление плагинов в один клик;
+  - индикатор загрузки на кнопке;
+  - проверка обновлений по номеру версии (правильно обрабатывает 1.0 == 1.0.0);
+  - поиск установленных плагинов по обоим именам: weather.py и plugin_weather.py;
+  - автоопределение версии для вручную поставленных плагинов;
+  - установка плагина из локального .py-файла;
+  - просмотр лога ошибок плагинов;
+  - фильтр по тегам;
+  - кнопка «Перезагрузить плагины» без перезапуска Deskify;
+  - окно поднимается поверх главного окна.
 
-Окно магазина поднимается поверх главного окна Deskify:
-transient + lift + focus_force + временный -topmost.
+ВАЖНО: sha256 НЕ проверяется. Поле в каталоге игнорируется.
 
 Каталог по умолчанию: https://github.com/deskify/Plugins
 """
@@ -19,6 +27,7 @@ import urllib.request
 import urllib.error
 import ssl
 import webbrowser
+import re as _re
 from datetime import datetime
 
 
@@ -134,6 +143,7 @@ def _resolve_url(plugin):
 # ============================================================
 
 def _parse_version(v):
+    """'1.0.0' -> (1, 0, 0). Хвостовые нули отбрасываются: 1.0.0 == 1.0 == 1."""
     if not v:
         return (0,)
     parts = []
@@ -145,11 +155,15 @@ def _parse_version(v):
             else:
                 break
         parts.append(int(num) if num else 0)
-    return tuple(parts) if parts else (0,)
+    if not parts:
+        return (0,)
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
 
 
 def _is_newer(installed_v, catalog_v):
-    if not installed_v:
+    if not installed_v or not catalog_v:
         return False
     return _parse_version(catalog_v) > _parse_version(installed_v)
 
@@ -161,13 +175,68 @@ def _versions_equal(a, b):
 
 
 # ============================================================
+#  Проверка установки (по basename)
+# ============================================================
+
+def _is_file_installed(plugin, installed_set):
+    """Проверяет, установлен ли плагин. Сравнивает по basename с учётом
+    обоих вариантов имени: weather.py и plugin_weather.py."""
+    if not installed_set:
+        return False
+    candidates = set()
+
+    name_in_catalog = plugin.get("file") or ""
+    if name_in_catalog:
+        base = os.path.basename(name_in_catalog)
+        candidates.add(base)
+        if not base.endswith(".py"):
+            candidates.add(base + ".py")
+
+    pid = plugin.get("id") or ""
+    if pid:
+        candidates.add(f"{pid}.py")
+        candidates.add(f"plugin_{pid}.py")
+
+    candidates.discard("")
+
+    for c in candidates:
+        if c in installed_set:
+            return True
+    return False
+
+
+def _heal_installed_versions(api, catalog):
+    """
+    Если плагин лежит в data/plugins/, но его нет в
+    installed_plugin_versions.json (например, поставлен вручную) —
+    считаем его версию равной версии из каталога.
+    Это предотвращает бесконечное «⬆ Обновить» на неизвестной версии.
+    """
+    changed = False
+    installed = _installed_plugin_files(api)
+    for plugin in catalog:
+        if not isinstance(plugin, dict):
+            continue
+        pid = plugin.get("id") or ""
+        if not pid:
+            continue
+        if pid in _state["installed_versions"]:
+            continue
+        if _is_file_installed(plugin, installed):
+            _state["installed_versions"][pid] = plugin.get("version", "")
+            changed = True
+    if changed:
+        _save_installed_versions(api)
+
+
+# ============================================================
 #  Сеть
 # ============================================================
 
 def _fetch_url(url, timeout=10):
     ctx = ssl.create_default_context()
     req = urllib.request.Request(
-        url, headers={"User-Agent": "Deskify-Plugin-Store/1.3"}
+        url, headers={"User-Agent": "Deskify-Plugin-Store/1.4"}
     )
     with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
         return resp.read()
@@ -310,6 +379,24 @@ def _install_from_file(api, refresh_cb):
         api["messagebox"].showerror("Ошибка", f"Не удалось записать: {e}")
         return
 
+    # Пытаемся вытащить версию из кода плагина
+    version = ""
+    try:
+        text = raw.decode("utf-8", errors="ignore")
+        m = _re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', text)
+        if not m:
+            m = _re.search(r'VERSION\s*=\s*["\']([^"\']+)["\']', text)
+        if m:
+            version = m.group(1)
+    except Exception:
+        pass
+
+    if version:
+        stem = filename[:-3]
+        pid = stem[len("plugin_"):] if stem.startswith("plugin_") else stem
+        _state["installed_versions"][pid] = version
+        _save_installed_versions(api)
+
     api["toast"](f"Установлен «{filename}». Не забудьте перезагрузить плагины.", "success")
     if refresh_cb:
         refresh_cb()
@@ -360,8 +447,6 @@ def _show_plugin_errors(api):
     win = api["ctk"].CTkToplevel(_state["window"] or api["app"])
     win.title("⚠ Ошибки загрузки плагинов")
     win.geometry("700x460")
-
-    # поднять поверх
     _raise_window(win, api["app"])
 
     box = api["ctk"].CTkTextbox(
@@ -389,10 +474,7 @@ def _show_plugin_errors(api):
 # ============================================================
 
 def _raise_window(win, parent=None):
-    """
-    Гарантирует, что Toplevel окажется спереди:
-    transient + lift + focus_force + временный -topmost.
-    """
+    """Поднимает Toplevel поверх главного окна."""
     try:
         if parent is not None:
             win.transient(parent)
@@ -467,7 +549,9 @@ def _show_format_help(api):
         "• tags — массив строк для фильтра\n"
         "• requires_requests — пометка про пакет requests\n\n"
         "sha256 в этой версии магазина НЕ проверяется —\n"
-        "поле игнорируется, даже если указано в каталоге."
+        "поле игнорируется, даже если указано в каталоге.\n\n"
+        "Сравнение версий: 1.0 == 1.0.0 == 1.0.0.0.\n"
+        "Хвостовые нули не считаются различием."
     )
     api["messagebox"].showinfo("Формат каталога", text)
 
@@ -498,6 +582,9 @@ def _render_plugins(api, frame, plugins, source):
 
     for w in list(frame.winfo_children()):
         w.destroy()
+
+    # Чиним версии установленных плагинов, если их нет в файле версий
+    _heal_installed_versions(api, plugins)
 
     if source == "online":
         _state["status_lbl"].configure(text="✓ Каталог обновлён",
@@ -551,14 +638,23 @@ def _render_plugins(api, frame, plugins, source):
 
         visible += 1
 
-        filename = _plugin_filename(plugin)
-        is_installed = filename in installed
+        # --- Определяем статус плагина ---
+        is_installed = _is_file_installed(plugin, installed)
         installed_v = installed_versions.get(pid, "")
-        update_available = (
-            is_installed
-            and _is_newer(installed_v, ver)
-            and not _versions_equal(installed_v, ver)
-        )
+
+        if not is_installed:
+            status = "not_installed"
+            update_available = False
+        elif not installed_v:
+            # файл есть, но версия неизвестна — не дёргаем «обновить»
+            status = "installed"
+            update_available = False
+        elif _is_newer(installed_v, ver):
+            status = "update_available"
+            update_available = True
+        else:
+            status = "installed"
+            update_available = False
 
         card = ctk.CTkFrame(frame, corner_radius=8)
         card.pack(fill="x", padx=4, pady=5)
@@ -603,7 +699,7 @@ def _render_plugins(api, frame, plugins, source):
         btn_box = ctk.CTkFrame(card, fg_color="transparent")
         btn_box.pack(side="right", padx=10, pady=8)
 
-        if is_installed and not update_available:
+        if status == "installed":
             ctk.CTkLabel(btn_box, text="✓ установлен",
                          text_color="#2ecc71",
                          font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(0, 4))
@@ -623,9 +719,14 @@ def _render_plugins(api, frame, plugins, source):
             ctk.CTkButton(btn_box, text="Удалить", width=100,
                           fg_color="#c0392b", hover_color="#e74c3c",
                           command=make_uninstall()).pack(pady=2)
+
         else:
-            btn_label = "⬆ Обновить" if update_available else "⬇ Установить"
-            btn_color = "#e67e22" if update_available else "#1f538d"
+            if status == "update_available":
+                btn_label = "⬆ Обновить"
+                btn_color = "#e67e22"
+            else:
+                btn_label = "⬇ Установить"
+                btn_color = "#1f538d"
 
             def make_install(p=plugin, box=btn_box):
                 def do_install():
@@ -723,7 +824,6 @@ def _open_store_window(api):
     if win is not None:
         try:
             if win.winfo_exists():
-                # Поднять поверх, если окно уже открыто
                 win.deiconify()
                 _raise_window(win, api["app"])
                 return
@@ -741,7 +841,7 @@ def _open_store_window(api):
     win.minsize(720, 540)
     _state["window"] = win
 
-    # === Поднять окно поверх главного окна Deskify ===
+    # Поднять поверх главного окна
     _raise_window(win, app)
 
     # Заголовок + статус
@@ -794,81 +894,4 @@ def _open_store_window(api):
     tag_row = ctk.CTkFrame(win, fg_color="transparent")
     tag_row.pack(fill="x", padx=16, pady=(4, 4))
 
-    # Кнопки действий
-    btn_row = ctk.CTkFrame(win, fg_color="transparent")
-    btn_row.pack(fill="x", padx=16, pady=(2, 6))
-
-    refresh_btn = ctk.CTkButton(btn_row, text="🔄 Обновить каталог", width=170)
-    refresh_btn.pack(side="left", padx=(0, 6))
-    ctk.CTkButton(btn_row, text="♻ Перезагрузить плагины", width=190,
-                  fg_color="gray30",
-                  command=lambda: _reload_plugins(api)).pack(side="left", padx=3)
-    ctk.CTkButton(btn_row, text="📂 Из файла...", width=130, fg_color="gray30",
-                  command=lambda: _install_from_file(
-                      api,
-                      lambda: _render_plugins(api, list_frame,
-                                               _state.get("catalog", []),
-                                               "search"))
-                  ).pack(side="left", padx=3)
-    ctk.CTkButton(btn_row, text="⚠ Ошибки", width=100, fg_color="gray30",
-                  command=lambda: _show_plugin_errors(api)).pack(side="left", padx=3)
-    ctk.CTkButton(btn_row, text="🔗 Репозиторий", width=130, fg_color="gray30",
-                  command=lambda: _open_repo(api)).pack(side="left", padx=3)
-    ctk.CTkButton(btn_row, text="📁 Папка", width=90, fg_color="gray30",
-                  command=lambda: _open_plugins_folder(api)).pack(side="left", padx=3)
-    ctk.CTkButton(btn_row, text="❓", width=40, fg_color="gray30",
-                  command=lambda: _show_format_help(api)).pack(side="left", padx=3)
-
-    # Список
-    list_frame = ctk.CTkScrollableFrame(win, fg_color=("gray90", "gray15"))
-    list_frame.pack(fill="both", expand=True, padx=16, pady=(4, 12))
-    _state["list_frame"] = list_frame
-
-    def reload_catalog():
-        _render_loading(list_frame, ctk)
-        status_lbl.configure(text="Загрузка каталога...", text_color="gray60")
-        refresh_btn.configure(state="disabled")
-
-        def worker():
-            plugins, source, err = _load_catalog(api)
-            _state["catalog"] = plugins or []
-            app.after(0, lambda: _render_tag_filter(api, tag_row, plugins, list_frame))
-            app.after(0, lambda: _render_plugins(api, list_frame, plugins, source))
-            app.after(0, lambda: refresh_btn.configure(state="normal"))
-            if source == "error" and err:
-                app.after(0, lambda: status_lbl.configure(
-                    text=f"✖ {err}", text_color="#e74c3c"))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    refresh_btn.configure(command=reload_catalog)
-
-    def on_search_change(*_):
-        _render_plugins(api, list_frame, _state.get("catalog", []), "search")
-
-    search_var.trace_add("write", on_search_change)
-
-    reload_catalog()
-    win.protocol("WM_DELETE_WINDOW", lambda: _close_window(win))
-
-
-def _close_window(win):
-    try:
-        win.destroy()
-    except Exception:
-        pass
-    _state["window"] = None
-
-
-# ============================================================
-#  Точка входа
-# ============================================================
-
-def register(api):
-    _state["api"] = api
-    _state["app"] = api["app"]
-
-    api["add_plugin_button"](
-        "🛒 Магазин плагинов",
-        lambda: _open_store_window(api),
-    )
+    #
