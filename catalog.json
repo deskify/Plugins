@@ -76,7 +76,7 @@
       "name": "Paint",
       "author": "Artur Galyautdinov",
       "description": "Paint - рисовать. Этим все сказано",
-      "version": "0.0.2",
+      "version": "0.0.3",
       "icon": "🎨",
       "file": "paint.py",
       "sha256": "5e5dcd2f2922668535a938ab5a82f704c36f8d75c6cbd90a007faed6bd4eaca2",
