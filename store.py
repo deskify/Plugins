@@ -1,24 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Магазин плагинов Deskify (v1.3.0).
+Магазин плагинов Deskify.
 
-Версия БЕЗ проверки sha256 — устанавливает файл, даже если он отличается
-от того, что зафиксировано в каталоге. Полезно для отладки и разработки.
+ВАЖНО: sha256 НЕ проверяется.
+Если в catalog.json указано поле sha256 — оно игнорируется.
+Файл устанавливается как есть, без проверки целостности.
 
-Каталог: https://github.com/deskify/Plugins
-
-Возможности:
-  - загрузка каталога из raw-URL (с фолбэком в кэш при отсутствии сети);
-  - установка / обновление / удаление плагинов в один клик;
-  - индикатор загрузки на кнопке;
-  - проверка обновлений по номеру версии;
-  - кнопка «Перезагрузить плагины» (без перезапуска Deskify);
-  - фильтр по тегам;
-  - установка плагина из локального .py-файла;
-  - просмотр лога ошибок плагинов;
-  - редактируемый URL каталога.
-
-Отличия от v1.2.0: НЕ проверяется sha256 при установке.
+Каталог по умолчанию: https://github.com/deskify/Plugins
 """
 
 import os
@@ -59,7 +47,7 @@ _state = {
 
 
 # ============================================================
-#  Конфиг и пути
+#  Пути и конфиг
 # ============================================================
 
 def _store_config_path(api):
@@ -261,7 +249,7 @@ def _install_plugin(api, plugin):
     if "<html" in text[:200].lower():
         return False, "По ссылке пришёл HTML. Нужна raw-ссылка, а не blob."
 
-    # ВАЖНО: sha256 НЕ проверяется — файл ставится как есть.
+    # sha256 НЕ проверяется
 
     try:
         with open(target, "wb") as f:
@@ -352,7 +340,8 @@ def _reload_plugins(api):
 def _show_plugin_errors(api):
     log_path = api["PathHelper"].get_path("plugin_errors.log")
     if not os.path.exists(log_path):
-        api["messagebox"].showinfo("Ошибки плагинов", "Лог пуст — плагины загрузились без ошибок.")
+        api["messagebox"].showinfo("Ошибки плагинов",
+                                    "Лог пуст — плагины загрузились без ошибок.")
         return
     try:
         with open(log_path, "r", encoding="utf-8") as f:
@@ -369,8 +358,10 @@ def _show_plugin_errors(api):
     win.title("⚠ Ошибки загрузки плагинов")
     win.geometry("700x460")
 
-    box = api["ctk"].CTkTextbox(win, wrap="word",
-                                 font=api["ctk"].CTkFont(family="Consolas", size=12))
+    box = api["ctk"].CTkTextbox(
+        win, wrap="word",
+        font=api["ctk"].CTkFont(family="Consolas", size=12)
+    )
     box.pack(fill="both", expand=True, padx=12, pady=12)
     box.insert("1.0", content)
 
@@ -401,7 +392,8 @@ def _open_plugins_folder(api):
         else:
             api["subprocess"].Popen(["xdg-open", pd])
     except Exception as e:
-        api["messagebox"].showinfo("Папка плагинов", f"Путь: {pd}\n\nНе удалось открыть: {e}")
+        api["messagebox"].showinfo("Папка плагинов",
+                                    f"Путь: {pd}\n\nНе удалось открыть: {e}")
 
 
 def _open_repo(api):
@@ -412,7 +404,7 @@ def _show_format_help(api):
     text = (
         "Каталог — это JSON-файл, лежащий в корне репозитория:\n"
         f"github.com/{GITHUB_REPO}\n\n"
-        "Минимальная запись плагина в catalog.json:\n"
+        "Минимальная запись плагина:\n"
         '{\n'
         '  "id": "weather",\n'
         '  "name": "Погода",\n'
@@ -426,13 +418,13 @@ def _show_format_help(api):
         "Поля:\n"
         "• id — уникальный идентификатор (обязателен)\n"
         "• name, description, author — для отображения\n"
-        "• version — сравнение с установленной для показа «Обновить»\n"
+        "• version — сравнение с установленной версией\n"
         "• file — имя .py в репозитории (или полный URL)\n"
         "• url — альтернатива file: прямая ссылка\n"
         "• tags — массив строк для фильтра\n"
-        "• requires_requests — пометка, что нужен пакет requests\n\n"
-        "ВАЖНО: sha256 в этой версии магазина НЕ проверяется.\n"
-        "Если он указан в каталоге, он будет просто проигнорирован."
+        "• requires_requests — пометка про пакет requests\n\n"
+        "sha256 в этой версии магазина НЕ проверяется —\n"
+        "поле игнорируется, даже если указано в каталоге."
     )
     api["messagebox"].showinfo("Формат каталога", text)
 
@@ -465,11 +457,14 @@ def _render_plugins(api, frame, plugins, source):
         w.destroy()
 
     if source == "online":
-        _state["status_lbl"].configure(text="✓ Каталог обновлён", text_color="#2ecc71")
+        _state["status_lbl"].configure(text="✓ Каталог обновлён",
+                                        text_color="#2ecc71")
     elif source == "cache":
-        _state["status_lbl"].configure(text="⚠ Нет сети — кэш", text_color="#e67e22")
+        _state["status_lbl"].configure(text="⚠ Нет сети — кэш",
+                                        text_color="#e67e22")
     elif source == "error":
-        _state["status_lbl"].configure(text="✖ Ошибка загрузки", text_color="#e74c3c")
+        _state["status_lbl"].configure(text="✖ Ошибка загрузки",
+                                        text_color="#e74c3c")
     else:
         _state["status_lbl"].configure(text="", text_color="gray60")
 
@@ -479,7 +474,7 @@ def _render_plugins(api, frame, plugins, source):
             text=("Каталог пуст или не загрузился.\n\n"
                   f"Проверьте, что файл catalog.json есть в репозитории:\n"
                   f"github.com/{GITHUB_REPO}\n\n"
-                  f"И что URL доступен:\n{DEFAULT_CATALOG_URL}"),
+                  f"URL по умолчанию:\n{DEFAULT_CATALOG_URL}"),
             text_color="gray60", justify="left",
         ).pack(pady=30, padx=10, anchor="w")
         return
@@ -516,13 +511,18 @@ def _render_plugins(api, frame, plugins, source):
         filename = _plugin_filename(plugin)
         is_installed = filename in installed
         installed_v = installed_versions.get(pid, "")
-        update_available = is_installed and _is_newer(installed_v, ver) and not _versions_equal(installed_v, ver)
+        update_available = (
+            is_installed
+            and _is_newer(installed_v, ver)
+            and not _versions_equal(installed_v, ver)
+        )
 
         card = ctk.CTkFrame(frame, corner_radius=8)
         card.pack(fill="x", padx=4, pady=5)
 
         ctk.CTkLabel(card, text=icon,
-                     font=ctk.CTkFont(size=28)).pack(side="left", padx=(12, 6), pady=10)
+                     font=ctk.CTkFont(size=28)).pack(side="left",
+                                                     padx=(12, 6), pady=10)
 
         info = ctk.CTkFrame(card, fg_color="transparent")
         info.pack(side="left", fill="both", expand=True, padx=4, pady=8)
@@ -538,7 +538,8 @@ def _render_plugins(api, frame, plugins, source):
                      anchor="w").pack(anchor="w")
         if author:
             ctk.CTkLabel(info, text=f"Автор: {author}",
-                         text_color="gray60", font=ctk.CTkFont(size=11),
+                         text_color="gray60",
+                         font=ctk.CTkFont(size=11),
                          anchor="w").pack(anchor="w")
         if desc:
             ctk.CTkLabel(info, text=str(desc), anchor="w", justify="left",
@@ -552,14 +553,16 @@ def _render_plugins(api, frame, plugins, source):
             meta_bits.append("🌐 нужен requests")
         if meta_bits:
             ctk.CTkLabel(info, text="   ".join(meta_bits),
-                         text_color="gray50", font=ctk.CTkFont(size=11),
+                         text_color="gray50",
+                         font=ctk.CTkFont(size=11),
                          anchor="w").pack(anchor="w", pady=(2, 0))
 
         btn_box = ctk.CTkFrame(card, fg_color="transparent")
         btn_box.pack(side="right", padx=10, pady=8)
 
         if is_installed and not update_available:
-            ctk.CTkLabel(btn_box, text="✓ установлен", text_color="#2ecc71",
+            ctk.CTkLabel(btn_box, text="✓ установлен",
+                         text_color="#2ecc71",
                          font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(0, 4))
 
             def make_uninstall(p=plugin):
@@ -598,7 +601,8 @@ def _render_plugins(api, frame, plugins, source):
                         ok, msg = _install_plugin(api, p)
                         api["app"].after(
                             0,
-                            lambda: _on_install_done(api, frame, p, ok, msg, box, btn_holder),
+                            lambda: _on_install_done(api, frame, p, ok, msg,
+                                                      box, btn_holder),
                         )
                     threading.Thread(target=worker, daemon=True).start()
                 return do_install
@@ -648,9 +652,11 @@ def _render_tag_filter(api, tag_row, plugins, list_frame):
 
     def style_btn(btn, active):
         if active:
-            btn.configure(fg_color="#1f538d", text_color="white", hover_color="#1c497d")
+            btn.configure(fg_color="#1f538d", text_color="white",
+                          hover_color="#1c497d")
         else:
-            btn.configure(fg_color="transparent", text_color=("gray10", "gray90"),
+            btn.configure(fg_color="transparent",
+                          text_color=("gray10", "gray90"),
                           hover_color=("gray70", "gray30"))
 
     all_btn = ctk.CTkButton(tag_row, text="Все", width=70, height=26,
@@ -687,7 +693,7 @@ def _open_store_window(api):
     _state["installed_versions"] = _load_installed_versions(api)
 
     win = ctk.CTkToplevel(app)
-    win.title("🛒 Магазин плагинов Deskify (без sha256)")
+    win.title("🛒 Магазин плагинов Deskify")
     win.geometry("900x680")
     win.minsize(720, 540)
     _state["window"] = win
@@ -702,9 +708,12 @@ def _open_store_window(api):
     status_lbl.pack(side="right")
     _state["status_lbl"] = status_lbl
 
-    ctk.CTkLabel(win, text=f"Источник: github.com/{GITHUB_REPO} ({GITHUB_BRANCH})  •  sha256 не проверяется",
-                 text_color="gray50",
-                 font=ctk.CTkFont(size=11)).pack(anchor="w", padx=16)
+    ctk.CTkLabel(
+        win,
+        text=f"Источник: github.com/{GITHUB_REPO} ({GITHUB_BRANCH})",
+        text_color="gray50",
+        font=ctk.CTkFont(size=11),
+    ).pack(anchor="w", padx=16)
 
     # URL каталога
     cfg_row = ctk.CTkFrame(win, fg_color="transparent")
@@ -750,7 +759,10 @@ def _open_store_window(api):
                   command=lambda: _reload_plugins(api)).pack(side="left", padx=3)
     ctk.CTkButton(btn_row, text="📂 Из файла...", width=130, fg_color="gray30",
                   command=lambda: _install_from_file(
-                      api, lambda: _render_plugins(api, list_frame, _state.get("catalog", []), "search"))
+                      api,
+                      lambda: _render_plugins(api, list_frame,
+                                               _state.get("catalog", []),
+                                               "search"))
                   ).pack(side="left", padx=3)
     ctk.CTkButton(btn_row, text="⚠ Ошибки", width=100, fg_color="gray30",
                   command=lambda: _show_plugin_errors(api)).pack(side="left", padx=3)
