@@ -496,9 +496,9 @@ def _open_paint_window(api):
         warn.pack(fill="x", padx=12, pady=(10, 4))
         ctk.CTkLabel(
             warn,
-            text="⚠ Pillow не установлен. Открытие/сохранение, заливка, "
+            text="⚠ Обновите workspace до версии 1.1 и выше. Открытие/сохранение, заливка, "
                  "пипетка и отмена недоступны.\n"
-                 "Установите: pip install Pillow",
+                 "Нет библиотеки pillow",
             text_color="white", justify="left",
             font=ctk.CTkFont(size=12),
         ).pack(padx=10, pady=8, anchor="w")
