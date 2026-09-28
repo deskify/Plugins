@@ -573,8 +573,8 @@ def _open_player_window(api):
         warn.pack(fill="x", padx=16, pady=(12, 4))
         ctk.CTkLabel(
             warn,
-            text="⚠ pygame не установлен — воспроизведение недоступно.\n"
-                 "Выполните:  pip install pygame  и перезапустите Deskify.",
+            text="⚠ Оюновите WorkSpace до версии 1.1 и выше\n"
+                 "Не доступна библиотека Pygame",
             text_color="white", justify="left",
             font=ctk.CTkFont(size=12),
         ).pack(padx=10, pady=8, anchor="w")
