@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Музыкальный плеер Deskify 2.0 с визуализацией.
+Музыкальный плеер Deskify 2.1.
 
 Возможности:
   - воспроизведение mp3 / wav / ogg / flac через pygame.mixer;
   - плейлист с сохранением между запусками;
   - повтор (нет / одна / плейлист) и случайный порядок;
   - живая визуализация: волны, спектр, круги;
-  - переливы цвета во времени;
-  - полноэкранный режим (F11 / Esc);
-  - регулировка чувствительности визуализации.
+  - переливы цвета через HSV;
+  - полноэкранный режим (F11 / Esc), стабильный при многократном переключении;
+  - регулировка чувствительности визуализации;
+  - проверка pygame: если нет — сообщение обновиться до Deskify 1.2.
 
-Зависимости: pygame (pip install pygame), Pillow (есть в ядре).
+Зависимости: pygame (pip install pygame), Pillow (есть в ядре 1.2+).
 Данные: data/music_playlist.json, data/music_config.json.
 """
 
@@ -19,9 +20,7 @@ import os
 import math
 import random
 import json
-import threading
 import time
-from datetime import datetime
 
 
 try:
@@ -126,7 +125,7 @@ def _save_playlist(api):
 
 def _ensure_mixer(api):
     if not HAS_PYGAME:
-        return False, "pygame не установлен.\n\nВыполните: pip install pygame"
+        return False, "pygame не установлен"
     if _state["initialized"]:
         return True, None
     try:
@@ -401,8 +400,16 @@ def _start_vis(api):
     _state["vis_job"] = api["app"].after(33, lambda: _vis_tick(api))
 
 
+def _stop_vis(api):
+    if _state["vis_job"] is not None:
+        try:
+            api["app"].after_cancel(_state["vis_job"])
+        except Exception:
+            pass
+        _state["vis_job"] = None
+
+
 def _vis_tick(api):
-    """Кадр визуализации ~30 fps."""
     _state["vis_job"] = None
     canvas = _state["ui"].get("vis_canvas")
     if canvas is None:
@@ -423,14 +430,8 @@ def _vis_tick(api):
 
 
 def _get_amplitudes():
-    """Возвращает список амплитуд для визуализации (0..1).
-    Если pygame доступен и музыка играет — берёт реальные данные.
-    Иначе — имитация на основе синуса.
-    """
     n = 64
     if HAS_PYGAME and _state["initialized"] and _state["playing"] and not _state["paused"]:
-        # pygame.mixer не даёт спектра напрямую — используем get_pos и синус
-        # для плавной имитации. Реальный спектр требует numpy + стерео-каналы.
         pos = pygame.mixer.music.get_pos() / 1000.0
         result = []
         for i in range(n):
@@ -442,7 +443,6 @@ def _get_amplitudes():
             result.append(abs(v))
         return result
     else:
-        # Тишина — плоская линия с лёгким движением
         pos = time.time()
         result = []
         for i in range(n):
@@ -452,7 +452,6 @@ def _get_amplitudes():
 
 
 def _hsv_to_rgb(h, s, v):
-    """h, s, v в 0..1 → (r, g, b) в 0..255."""
     if s == 0:
         c = int(v * 255)
         return c, c, c
@@ -505,7 +504,6 @@ def _draw_vis(api, canvas):
 
 
 def _draw_waves(canvas, w, h, amps, t):
-    """Плавные волны с градиентом цвета."""
     layers = 4
     n = len(amps)
     for layer in range(layers):
@@ -520,12 +518,10 @@ def _draw_waves(canvas, w, h, amps, t):
             y = offset_y + math.sin(phase + i * 0.25) * amplitude * (0.4 + a * 0.6)
             points.append((x, int(y)))
 
-        # Цвет по hue, меняется во времени и по слою
         hue = (t * 0.1 + layer * 0.15) % 1.0
         r, g, b = _hsv_to_rgb(hue, 0.8, 0.9)
         color = f"#{r:02x}{g:02x}{b:02x}"
 
-        # Заливаем между волной и низом
         poly = points + [(w, h), (0, h)]
         flat = []
         for p in poly:
@@ -535,7 +531,6 @@ def _draw_waves(canvas, w, h, amps, t):
         except Exception:
             pass
 
-        # Линия поверх
         flat_line = []
         for p in points:
             flat_line.extend(p)
@@ -546,7 +541,6 @@ def _draw_waves(canvas, w, h, amps, t):
 
 
 def _draw_spectrum(canvas, w, h, amps, t):
-    """Столбики эквалайзера с переливами."""
     n = len(amps)
     bar_w = w / n
     for i in range(n):
@@ -563,14 +557,12 @@ def _draw_spectrum(canvas, w, h, amps, t):
 
         canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="")
 
-        # Яркий "отблеск" на верхушке
         r2, g2, b2 = _hsv_to_rgb(hue, 0.4, 1.0)
         top_color = f"#{r2:02x}{g2:02x}{b2:02x}"
         canvas.create_rectangle(x1, y1, x2, y1 + 3, fill=top_color, outline="")
 
 
 def _draw_circles(canvas, w, h, amps, t):
-    """Круги от центра, размер зависит от амплитуды."""
     cx, cy = w // 2, h // 2
     max_r = min(w, h) * 0.45
 
@@ -597,7 +589,6 @@ def _draw_circles(canvas, w, h, amps, t):
         except Exception:
             pass
 
-    # Центральный пульс
     a0 = amps[0] if amps else 0
     core_r = int(20 + a0 * 40)
     hue = t * 0.3 % 1.0
@@ -810,6 +801,8 @@ def _toggle_fullscreen(api):
 
 
 def _enter_fullscreen(api, win):
+    ui = _state["ui"]
+
     try:
         _state["saved_geometry"] = win.geometry()
     except Exception:
@@ -817,23 +810,65 @@ def _enter_fullscreen(api, win):
 
     _state["fullscreen"] = True
 
-    for key in ("top_bar", "controls", "vol_row", "head_row", "list_panel", "bottom_bar"):
-        w = _state["ui"].get(key)
+    # Скрываем нижний блок (плейлист + кнопки)
+    bottom = ui.get("bottom_block")
+    if bottom is not None:
+        try:
+            bottom.pack_forget()
+        except Exception:
+            pass
+
+    # Скрываем всё, кроме панели визуализации
+    for key in ("top_bar", "now_card", "controls", "vol_row", "head_row"):
+        w = ui.get(key)
         if w is not None:
             try:
                 w.pack_forget()
             except Exception:
                 pass
 
-    # Vis canvas — на весь экран
-    vis_wrap = _state["ui"].get("vis_wrap")
-    if vis_wrap is not None:
+    # Панель визуализации — на весь экран
+    vis_panel = ui.get("vis_panel")
+    if vis_panel is not None:
         try:
-            vis_wrap.pack_forget()
-            vis_wrap.pack(fill="both", expand=True, padx=0, pady=0, in_=win)
+            vis_panel.pack_forget()
+            try:
+                vis_panel.configure(fg_color="black", corner_radius=0)
+            except Exception:
+                pass
+            vis_panel.pack(fill="both", expand=True, padx=0, pady=0)
         except Exception:
             pass
 
+    # Скрываем верхнюю панель визуализации (переключатели)
+    vis_top = ui.get("vis_top")
+    if vis_top is not None:
+        try:
+            vis_top.pack_forget()
+        except Exception:
+            pass
+
+    # Холст — на весь размер
+    vis_wrap = ui.get("vis_wrap")
+    if vis_wrap is not None:
+        try:
+            vis_wrap.pack_forget()
+            try:
+                vis_wrap.configure(fg_color="black", corner_radius=0)
+            except Exception:
+                pass
+            vis_wrap.pack(fill="both", expand=True, padx=0, pady=0)
+        except Exception:
+            pass
+
+    canvas = ui.get("vis_canvas")
+    if canvas is not None:
+        try:
+            canvas.configure(bg="black")
+        except Exception:
+            pass
+
+    # Фуллскрин
     try:
         win.attributes("-fullscreen", True)
     except Exception:
@@ -845,11 +880,11 @@ def _enter_fullscreen(api, win):
         pass
 
     # Подсказка
-    hint = _state["ui"].get("hint_lbl")
+    hint = ui.get("hint_lbl")
     if hint is not None:
         try:
             hint.configure(text="F11 или Esc — выйти из полного экрана")
-            hint.place(relx=0.5, rely=0.95, anchor="s")
+            hint.place(relx=0.5, rely=0.96, anchor="s")
             hint.lift()
             win.after(3000, lambda: hint.place_forget())
         except Exception:
@@ -857,6 +892,8 @@ def _enter_fullscreen(api, win):
 
 
 def _exit_fullscreen(api, win):
+    ui = _state["ui"]
+
     _state["fullscreen"] = False
 
     try:
@@ -864,14 +901,7 @@ def _exit_fullscreen(api, win):
     except Exception:
         pass
 
-    vis_wrap = _state["ui"].get("vis_wrap")
-    if vis_wrap is not None:
-        try:
-            vis_wrap.pack_forget()
-        except Exception:
-            pass
-
-    # Возвращаем геометрию
+    # Геометрия
     saved = _state.get("saved_geometry")
     if saved:
         try:
@@ -879,52 +909,143 @@ def _exit_fullscreen(api, win):
         except Exception:
             pass
 
-    # Возвращаем панели — порядок важен
-    for key in ("top_bar", "controls", "vol_row", "head_row"):
-        w = _state["ui"].get(key)
+    # Возвращаем фон панели визуализации
+    vis_panel = ui.get("vis_panel")
+    if vis_panel is not None:
+        try:
+            vis_panel.pack_forget()
+            vis_panel.configure(fg_color=("gray14", "gray17"), corner_radius=8)
+        except Exception:
+            pass
+
+    # vis_wrap
+    vis_wrap = ui.get("vis_wrap")
+    if vis_wrap is not None:
+        try:
+            vis_wrap.pack_forget()
+            try:
+                vis_wrap.configure(fg_color="#0a0a12", corner_radius=6)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    canvas = ui.get("vis_canvas")
+    if canvas is not None:
+        try:
+            canvas.configure(bg="#0a0a12")
+        except Exception:
+            pass
+
+    # Возвращаем верхнюю панель визуализации
+    vis_top = ui.get("vis_top")
+    if vis_top is not None:
+        try:
+            vis_top.pack(fill="x", padx=10, pady=(6, 2), before=vis_wrap)
+        except Exception:
+            pass
+
+    if vis_wrap is not None:
+        try:
+            vis_wrap.pack(fill="x", padx=10, pady=(4, 10))
+        except Exception:
+            pass
+
+    # Возвращаем панели в правильном порядке
+    order = [
+        ("top_bar",   {"fill": "x", "padx": 16, "pady": (10, 4)}),
+        ("now_card",  {"fill": "x", "padx": 16, "pady": (4, 4)}),
+        ("controls",  {"pady": (6, 4)}),
+        ("vol_row",   {"fill": "x", "padx": 16, "pady": (4, 6)}),
+        ("vis_panel", {"fill": "x", "padx": 16, "pady": (4, 4)}),
+        ("head_row",  {"fill": "x", "padx": 16, "pady": (6, 2)}),
+    ]
+    for key, opts in order:
+        w = ui.get(key)
         if w is not None:
             try:
-                w.pack(fill="x" if key in ("top_bar", "vol_row", "head_row") else None,
-                       padx=16 if key in ("top_bar", "vol_row", "head_row") else None,
-                       pady=4 if key in ("top_bar", "head_row") else 6)
+                w.pack_forget()
+                w.pack(**opts)
             except Exception:
                 pass
 
-    # Контейнер body
-    body = _state["ui"].get("body")
-    if body is not None:
+    # Возвращаем нижний блок (плейлист)
+    bottom = ui.get("bottom_block")
+    if bottom is not None:
         try:
-            body.pack_forget()
-            body.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+            bottom.pack_forget()
+            bottom.pack(fill="both", expand=True, padx=16, pady=(0, 12))
         except Exception:
             pass
 
-    # vis_wrap в body
-    if vis_wrap is not None:
-        try:
-            vis_wrap.pack(fill="both", expand=True)
-        except Exception:
-            pass
 
-    # list_panel и bottom_bar
-    lp = _state["ui"].get("list_panel")
-    if lp is not None:
-        try:
-            lp.pack(fill="both", expand=True)
-        except Exception:
-            pass
+# ============================================================
+#  Проверка pygame
+# ============================================================
 
-    bb = _state["ui"].get("bottom_bar")
-    if bb is not None:
-        try:
-            bb.pack(fill="x", pady=(6, 0))
-        except Exception:
-            pass
+def _open_requires_update_window(api):
+    """Показывает окно: обновите Deskify до 1.2, чтобы плеер работал."""
+    ctk = api["ctk"]
+    app = api["app"]
+
+    win = ctk.CTkToplevel(app)
+    win.title("🎵 Музыка — требуется обновление")
+    win.geometry("560x340")
+    win.resizable(False, False)
+    _state["window"] = win
 
     try:
-        win.update_idletasks()
+        win.transient(app)
+        win.lift()
+        win.focus_force()
+        win.attributes("-topmost", True)
+        win.after(150, lambda: _unset_topmost(win))
     except Exception:
         pass
+
+    # Заголовок
+    ctk.CTkLabel(win, text="🎵 Музыкальный плеер недоступен",
+                 font=ctk.CTkFont(size=17, weight="bold")).pack(pady=(24, 8))
+
+    # Сообщение
+    ctk.CTkLabel(
+        win,
+        text=("Для работы музыкального плеера нужна библиотека pygame.\n\n"
+              "В Deskify 1.2 она уже встроена — просто обновитесь\n"
+              "до версии 1.2 или новее.\n\n"
+              "Если вы уже на 1.2, но видите это окно — значит сборка\n"
+              "была сделана без поддержки pygame. Скачайте свежий\n"
+              "установщик с GitHub."),
+        justify="center", text_color="gray60",
+        font=ctk.CTkFont(size=12),
+    ).pack(padx=30, pady=(0, 14))
+
+    # Кнопки
+    btns = ctk.CTkFrame(win, fg_color="transparent")
+    btns.pack(pady=(0, 20))
+
+    def open_releases():
+        try:
+            import webbrowser
+            webbrowser.open("https://github.com/deskify/Workspace/releases")
+        except Exception:
+            pass
+
+    ctk.CTkButton(btns, text="📄 Открыть релизы", width=180, height=40,
+                  fg_color="#1f538d",
+                  command=open_releases).pack(side="left", padx=6)
+    ctk.CTkButton(btns, text="Закрыть", width=120, height=40,
+                  fg_color="gray30",
+                  command=win.destroy).pack(side="left", padx=6)
+
+    def on_close():
+        _state["window"] = None
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+    win.protocol("WM_DELETE_WINDOW", on_close)
 
 
 # ============================================================
@@ -932,7 +1053,12 @@ def _exit_fullscreen(api, win):
 # ============================================================
 
 def _open_player_window(api):
-    win = _state.get("window")
+    # Проверка pygame
+    if not HAS_PYGAME:
+        _open_requires_update_window(api)
+        return
+
+    win = _state["window"]
     if win is not None:
         try:
             if win.winfo_exists():
@@ -963,17 +1089,6 @@ def _open_player_window(api):
     except Exception:
         pass
 
-    if not HAS_PYGAME:
-        warn = ctk.CTkFrame(win, fg_color="#7a3a10", corner_radius=6)
-        warn.pack(fill="x", padx=16, pady=(10, 4))
-        ctk.CTkLabel(
-            warn,
-            text="⚠ pygame не установлен — воспроизведение недоступно.\n"
-                 "Выполните: pip install pygame",
-            text_color="white", justify="left",
-            font=ctk.CTkFont(size=12),
-        ).pack(padx=10, pady=8, anchor="w")
-
     # ---------- Верхняя панель ----------
     top_bar = ctk.CTkFrame(win, fg_color="transparent")
     top_bar.pack(fill="x", padx=16, pady=(10, 4))
@@ -1001,8 +1116,7 @@ def _open_player_window(api):
     prog.pack(fill="x", padx=12, pady=(0, 10))
 
     time_lbl = ctk.CTkLabel(prog, text="00:00 / 00:00",
-                             font=ctk.CTkFont(size=11),
-                             text_color="gray60")
+                             font=ctk.CTkFont(size=11), text_color="gray60")
     time_lbl.pack(side="right", padx=(8, 0))
     _state["ui"]["time_lbl"] = time_lbl
 
@@ -1076,6 +1190,7 @@ def _open_player_window(api):
 
     vis_top = ctk.CTkFrame(vis_panel, fg_color="transparent")
     vis_top.pack(fill="x", padx=10, pady=(6, 2))
+    _state["ui"]["vis_top"] = vis_top
 
     ctk.CTkLabel(vis_top, text="Визуализация:",
                  font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(0, 6))
@@ -1097,7 +1212,6 @@ def _open_player_window(api):
                                       sens_lbl.configure(text=f"{float(v):.1f}"))
                   ).pack(side="right", padx=4)
 
-    # Контейнер визуализации (используется в fullscreen)
     vis_wrap = ctk.CTkFrame(vis_panel, fg_color="#0a0a12", corner_radius=6,
                              height=200)
     vis_wrap.pack(fill="x", padx=10, pady=(4, 10))
@@ -1121,21 +1235,16 @@ def _open_player_window(api):
     pl_count.pack(side="right")
     _state["ui"]["pl_count"] = pl_count
 
-    # Контейнер для списка + кнопок
-    body = ctk.CTkFrame(win, fg_color="transparent")
-    body.pack(fill="both", expand=True, padx=16, pady=(0, 12))
-    _state["ui"]["body"] = body
+    # Нижний блок — контейнер плейлиста и кнопок
+    bottom_block = ctk.CTkFrame(win, fg_color="transparent")
+    bottom_block.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+    _state["ui"]["bottom_block"] = bottom_block
 
-    list_panel = ctk.CTkFrame(body, fg_color="transparent")
-    list_panel.pack(fill="both", expand=True)
-    _state["ui"]["list_panel"] = list_panel
-
-    list_frame = ctk.CTkScrollableFrame(list_panel, fg_color=("gray90", "gray15"))
+    list_frame = ctk.CTkScrollableFrame(bottom_block, fg_color=("gray90", "gray15"))
     list_frame.pack(fill="both", expand=True)
     _state["ui"]["list_frame"] = list_frame
 
-    # Кнопки действий
-    bottom_bar = ctk.CTkFrame(list_panel, fg_color="transparent")
+    bottom_bar = ctk.CTkFrame(bottom_block, fg_color="transparent")
     bottom_bar.pack(fill="x", pady=(6, 0))
     _state["ui"]["bottom_bar"] = bottom_bar
 
@@ -1229,10 +1338,8 @@ def _open_player_window(api):
                              font=ctk.CTkFont(size=13, weight="bold"))
     _state["ui"]["hint_lbl"] = hint_lbl
 
-    # Запускаем визуализацию
     _start_vis(api)
 
-    # Обновляем состояние кнопок
     _update_repeat_button(api)
     _update_shuffle_button(api)
     _update_play_button(api)
@@ -1241,13 +1348,7 @@ def _open_player_window(api):
         _start_tick(api)
 
     def on_close():
-        # Останавливаем таймеры визуализации
-        if _state["vis_job"] is not None:
-            try:
-                api["app"].after_cancel(_state["vis_job"])
-            except Exception:
-                pass
-            _state["vis_job"] = None
+        _stop_vis(api)
         if _state["tick_job"] is not None:
             try:
                 api["app"].after_cancel(_state["tick_job"])
