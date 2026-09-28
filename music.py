@@ -1,19 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Музыкальный плеер Deskify 2.1.
+Музыкальный плеер Deskify 2.2 — с реальным пульсом по битам.
 
 Возможности:
-  - воспроизведение mp3 / wav / ogg / flac через pygame.mixer;
-  - плейлист с сохранением между запусками;
-  - повтор (нет / одна / плейлист) и случайный порядок;
-  - живая визуализация: волны, спектр, круги;
-  - переливы цвета через HSV;
-  - полноэкранный режим (F11 / Esc), стабильный при многократном переключении;
-  - регулировка чувствительности визуализации;
-  - проверка pygame: если нет — сообщение обновиться до Deskify 1.2.
+  - воспроизведение mp3 / wav / ogg / flac;
+  - плейлист с сохранением;
+  - повтор, случайный порядок, громкость;
+  - визуализация: волны, спектр, круги;
+  - реальный пульс по сэмплам трека (через numpy + pygame.sndarray);
+  - fallback на синусную имитацию, если сэмплы недоступны;
+  - полноэкранный режим (F11 / Esc), стабильный при многократном переключении.
 
-Зависимости: pygame (pip install pygame), Pillow (есть в ядре 1.2+).
-Данные: data/music_playlist.json, data/music_config.json.
+Зависимости: pygame, numpy (есть в Deskify 1.2+).
 """
 
 import os
@@ -30,6 +28,13 @@ except ImportError:
     pygame = None
     HAS_PYGAME = False
 
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    np = None
+    HAS_NUMPY = False
+
 
 PLAYLIST_FILENAME = "music_playlist.json"
 CONFIG_FILENAME = "music_config.json"
@@ -44,6 +49,12 @@ REPEAT_LABELS = {
 }
 
 VIS_MODES = ["Волны", "Спектр", "Круги"]
+
+# Параметры анализа сэмплов
+SAMPLE_WINDOW = 2048     # размер окна для анализа
+BASS_BAND = (0, 8)       # индексы FFT для низких
+MID_BAND = (8, 24)       # средние
+HIGH_BAND = (24, 64)     # высокие
 
 
 _state = {
@@ -69,6 +80,15 @@ _state = {
     "fullscreen": False,
     "saved_geometry": None,
     "vis_frame_count": 0,
+    # для анализа сэмплов
+    "sound": None,           # pygame.mixer.Sound текущего трека
+    "samples": None,         # numpy-массив сэмплов
+    "sample_rate": 44100,
+    "channels": 2,
+    "start_time": 0.0,       # когда началось воспроизведение
+    "pause_offset": 0.0,     # смещение при паузе
+    # сглаживание полос
+    "bands_smooth": {"bass": 0.0, "mid": 0.0, "high": 0.0},
 }
 
 
@@ -131,20 +151,146 @@ def _ensure_mixer(api):
     try:
         pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
         _state["initialized"] = True
+        _state["sample_rate"] = pygame.mixer.get_init()[0]
+        _state["channels"] = pygame.mixer.get_init()[2]
         pygame.mixer.music.set_volume(float(_state["config"].get("volume", 0.7)))
         return True, None
     except Exception as e:
         return False, f"Не удалось инициализировать аудио: {e}"
 
 
-def _read_duration(path):
-    if not HAS_PYGAME:
-        return 0.0
+# ============================================================
+#  Анализ сэмплов
+# ============================================================
+
+def _load_samples(path):
+    """Загружает трек как Sound и получает numpy-массив сэмплов.
+    Возвращает (samples, error). samples — numpy массив формы (N, channels) или (N,)."""
+    _state["sound"] = None
+    _state["samples"] = None
+
+    if not HAS_PYGAME or not HAS_NUMPY:
+        return None, "numpy или pygame недоступны"
+
     try:
         snd = pygame.mixer.Sound(path)
-        return float(snd.get_length())
+        _state["sound"] = snd
+    except Exception as e:
+        return None, f"Sound.load: {e}"
+
+    try:
+        from pygame import sndarray
+        arr = sndarray.samples(snd)
+        if arr is None:
+            return None, "sndarray вернул None"
+
+        # Приводим к float32
+        samples = arr.astype("float32", copy=False)
+
+        # Если стерео — усредняем каналы для общего уровня
+        if samples.ndim == 2 and samples.shape[1] >= 2:
+            mono = samples.mean(axis=1)
+        elif samples.ndim == 2 and samples.shape[1] == 1:
+            mono = samples[:, 0]
+        else:
+            mono = samples
+
+        # Нормализуем в диапазон примерно [-1, 1]
+        peak = float(np.max(np.abs(mono))) if mono.size else 1.0
+        if peak > 0:
+            mono = mono / peak
+
+        _state["samples"] = mono
+        return mono, None
+    except Exception as e:
+        return None, f"sndarray: {e}"
+
+
+def _compute_position_samples():
+    """Возвращает блок сэмплов вокруг текущей позиции воспроизведения."""
+    mono = _state["samples"]
+    if mono is None or not HAS_NUMPY:
+        return None
+
+    try:
+        if _state["paused"]:
+            pos_sec = _state["pause_offset"]
+        else:
+            elapsed = time.time() - _state["start_time"]
+            pos_sec = _state["pause_offset"] + elapsed
+
+        idx = int(pos_sec * _state["sample_rate"])
+        n_total = mono.shape[0]
+        if n_total == 0:
+            return None
+
+        idx = max(0, min(n_total - 1, idx))
+        start = max(0, idx - SAMPLE_WINDOW // 2)
+        end = min(n_total, start + SAMPLE_WINDOW)
+        if end - start < 16:
+            return None
+
+        return mono[start:end]
     except Exception:
-        return 0.0
+        return None
+
+
+def _compute_bands():
+    """Возвращает (bass, mid, high) — уровни по частотам, 0..1, со сглаживанием."""
+    chunk = _compute_position_samples()
+    if chunk is None or not HAS_NUMPY or chunk.size < 64:
+        return 0.0, 0.0, 0.0
+
+    try:
+        # Окно Ханна для уменьшения утечки
+        window = np.hanning(chunk.size)
+        windowed = chunk * window
+
+        # FFT
+        spec = np.abs(np.fft.rfft(windowed))
+
+        if spec.size < 2:
+            return 0.0, 0.0, 0.0
+
+        # Сжимаем к 64 бинам (или меньше, если спектр короткий)
+        target = min(64, spec.size)
+        # Разбиваем спектр на target групп
+        group_size = max(1, spec.size // target)
+        binned = []
+        for i in range(target):
+            lo = i * group_size
+            hi = min(spec.size, (i + 1) * group_size)
+            if hi > lo:
+                binned.append(float(spec[lo:hi].mean()))
+            else:
+                binned.append(0.0)
+        binned = np.array(binned)
+
+        # Нормализация логарифмом для визуальной выразительности
+        binned = np.log1p(binned * 50.0)
+        peak = float(np.max(binned)) if binned.size else 1.0
+        if peak > 0:
+            binned = binned / peak
+
+        def band_avg(lo, hi):
+            lo = max(0, min(len(binned) - 1, lo))
+            hi = max(lo + 1, min(len(binned), hi))
+            return float(binned[lo:hi].mean()) if hi > lo else 0.0
+
+        bass = band_avg(BASS_BAND[0], BASS_BAND[1])
+        mid = band_avg(MID_BAND[0], MID_BAND[1])
+        high = band_avg(HIGH_BAND[0], HIGH_BAND[1])
+
+        # Сглаживание во времени — чтобы не дёргалось слишком резко
+        smooth = _state["bands_smooth"]
+        alpha = 0.6  # скорость сглаживания: меньше — плавнее
+        smooth["bass"] = smooth["bass"] * alpha + bass * (1 - alpha)
+        smooth["mid"] = smooth["mid"] * alpha + mid * (1 - alpha)
+        smooth["high"] = smooth["high"] * alpha + high * (1 - alpha)
+
+        return smooth["bass"], smooth["mid"], smooth["high"]
+    except Exception:
+        return 0.0, 0.0, 0.0
 
 
 # ============================================================
@@ -158,6 +304,16 @@ def _track_title(path):
         return name
     except Exception:
         return str(path)
+
+
+def _read_duration(path):
+    if not HAS_PYGAME:
+        return 0.0
+    try:
+        snd = pygame.mixer.Sound(path)
+        return float(snd.get_length())
+    except Exception:
+        return 0.0
 
 
 def _play_index(api, index):
@@ -177,20 +333,35 @@ def _play_index(api, index):
         api["toast"](f"Файл не найден: {os.path.basename(path)}", "error")
         return
 
+    # Сначала останавливаем текущее
+    try:
+        pygame.mixer.music.stop()
+    except Exception:
+        pass
+
+    # Воспроизведение через mixer.music
     try:
         pygame.mixer.music.load(path)
         pygame.mixer.music.set_volume(float(_state["config"].get("volume", 0.7)))
         pygame.mixer.music.play()
-        _state["current_index"] = index
-        _state["playing"] = True
-        _state["paused"] = False
-        _state["track_duration"] = _read_duration(path)
-        _update_now_playing(api)
-        _update_play_button(api)
-        _highlight_current(api)
-        _start_tick(api)
     except Exception as e:
         api["messagebox"].showerror("Плеер", f"Не удалось воспроизвести:\n{e}")
+        return
+
+    # Загружаем сэмплы для визуализации (отдельно от музыки, только для анализа)
+    _load_samples(path)
+
+    _state["current_index"] = index
+    _state["playing"] = True
+    _state["paused"] = False
+    _state["start_time"] = time.time()
+    _state["pause_offset"] = 0.0
+    _state["track_duration"] = _read_duration(path)
+
+    _update_now_playing(api)
+    _update_play_button(api)
+    _highlight_current(api)
+    _start_tick(api)
 
 
 def _toggle_pause(api):
@@ -202,9 +373,11 @@ def _toggle_pause(api):
         if _state["paused"]:
             pygame.mixer.music.unpause()
             _state["paused"] = False
+            _state["start_time"] = time.time()
             _start_tick(api)
         else:
             pygame.mixer.music.pause()
+            _state["pause_offset"] += time.time() - _state["start_time"]
             _state["paused"] = True
     except Exception:
         pass
@@ -221,6 +394,8 @@ def _stop(api):
     _state["playing"] = False
     _state["paused"] = False
     _state["track_duration"] = 0.0
+    _state["start_time"] = 0.0
+    _state["pause_offset"] = 0.0
     _update_now_playing(api)
     _update_play_button(api)
     _update_progress(api)
@@ -306,6 +481,8 @@ def _seek(api, fraction):
         pygame.mixer.music.play(start=target)
         pygame.mixer.music.set_volume(float(_state["config"].get("volume", 0.7)))
         _state["paused"] = False
+        _state["start_time"] = time.time()
+        _state["pause_offset"] = target
         _start_tick(api)
     except Exception as e:
         api["toast"](f"Перемотка не удалась: {e}", "error")
@@ -430,7 +607,48 @@ def _vis_tick(api):
 
 
 def _get_amplitudes():
+    """Возвращает массив 64 амплитуды.
+    Если доступны сэмплы — берёт реальные значения из трека.
+    Иначе — синусная имитация."""
     n = 64
+
+    if not HAS_NUMPY:
+        return _synthetic_amplitudes(n)
+
+    chunk = _compute_position_samples()
+    if chunk is None or chunk.size < 64:
+        return _synthetic_amplitudes(n)
+
+    try:
+        window = np.hanning(chunk.size)
+        windowed = chunk * window
+        spec = np.abs(np.fft.rfft(windowed))
+
+        if spec.size < 4:
+            return _synthetic_amplitudes(n)
+
+        group_size = max(1, spec.size // n)
+        result = []
+        for i in range(n):
+            lo = i * group_size
+            hi = min(spec.size, (i + 1) * group_size)
+            if hi > lo:
+                result.append(float(spec[lo:hi].mean()))
+            else:
+                result.append(0.0)
+
+        arr = np.array(result)
+        arr = np.log1p(arr * 50.0)
+        peak = float(np.max(arr)) if arr.size else 1.0
+        if peak > 0:
+            arr = arr / peak
+        return arr.tolist()
+    except Exception:
+        return _synthetic_amplitudes(n)
+
+
+def _synthetic_amplitudes(n):
+    """Fallback — старая синусная имитация."""
     if HAS_PYGAME and _state["initialized"] and _state["playing"] and not _state["paused"]:
         pos = pygame.mixer.music.get_pos() / 1000.0
         result = []
@@ -484,11 +702,30 @@ def _draw_vis(api, canvas):
     if w < 10 or h < 10:
         return
 
-    mode = _state["config"].get("vis_mode", "Волны")
+    # Берём режим из StringVar меню — чтобы отрисовка совпадала с UI
+    mode = "Волны"
+    try:
+        vis_var = _state["ui"].get("vis_var")
+        if vis_var is not None:
+            mode = vis_var.get()
+    except Exception:
+        pass
+    if mode not in VIS_MODES:
+        mode = _state["config"].get("vis_mode", "Волны")
+    if mode not in VIS_MODES:
+        mode = "Волны"
+
     sensitivity = float(_state["config"].get("vis_sensitivity", 1.0))
     amps = _get_amplitudes()
     if sensitivity != 1.0:
-        amps = [min(1.0, a * sensitivity) for a in amps]
+        amps = [min(1.5, a * sensitivity) for a in amps]
+
+    # Реальные полосы частот
+    bass, mid, high = _compute_bands()
+    if sensitivity != 1.0:
+        bass = min(1.5, bass * sensitivity)
+        mid = min(1.5, mid * sensitivity)
+        high = min(1.5, high * sensitivity)
 
     t = _state["vis_frame_count"] / 30.0
     bg = "#0a0a12"
@@ -496,21 +733,29 @@ def _draw_vis(api, canvas):
     canvas.create_rectangle(0, 0, w, h, fill=bg, outline="")
 
     if mode == "Волны":
-        _draw_waves(canvas, w, h, amps, t)
+        _draw_waves(canvas, w, h, amps, t, bass, mid, high)
     elif mode == "Спектр":
-        _draw_spectrum(canvas, w, h, amps, t)
+        _draw_spectrum(canvas, w, h, amps, t, bass, mid, high)
     elif mode == "Круги":
-        _draw_circles(canvas, w, h, amps, t)
+        _draw_circles(canvas, w, h, amps, t, bass, mid, high)
 
 
-def _draw_waves(canvas, w, h, amps, t):
-    layers = 4
+def _draw_waves(canvas, w, h, amps, t, bass, mid, high):
+    """Слои волн. Каждый слой реагирует на свою полосу частот."""
+    layers = [
+        (bass, 0.0, "низкие"),
+        (mid, 0.15, "средние"),
+        (high, 0.3, "высокие"),
+        ((bass + mid + high) / 3, 0.45, "общие"),
+    ]
     n = len(amps)
-    for layer in range(layers):
+
+    for layer_idx, (band_level, hue_offset, _) in enumerate(layers):
         points = []
-        phase = t * (0.5 + layer * 0.15) + layer * 1.3
-        amplitude = (0.15 + layer * 0.05) * h * 0.4
-        offset_y = h / 2 + (layer - layers / 2) * 30
+        phase = t * (0.5 + layer_idx * 0.15) + layer_idx * 1.3
+        # Амплитуда слоя зависит от его полосы + общий пульс
+        amplitude = (0.15 + layer_idx * 0.05) * h * 0.4 * (0.5 + band_level * 1.5)
+        offset_y = h / 2 + (layer_idx - 2) * 30
 
         for i in range(n + 1):
             x = int(w * i / n)
@@ -518,8 +763,8 @@ def _draw_waves(canvas, w, h, amps, t):
             y = offset_y + math.sin(phase + i * 0.25) * amplitude * (0.4 + a * 0.6)
             points.append((x, int(y)))
 
-        hue = (t * 0.1 + layer * 0.15) % 1.0
-        r, g, b = _hsv_to_rgb(hue, 0.8, 0.9)
+        hue = (t * 0.1 + hue_offset) % 1.0
+        r, g, b = _hsv_to_rgb(hue, 0.85, 0.9)
         color = f"#{r:02x}{g:02x}{b:02x}"
 
         poly = points + [(w, h), (0, h)]
@@ -535,14 +780,20 @@ def _draw_waves(canvas, w, h, amps, t):
         for p in points:
             flat_line.extend(p)
         try:
-            canvas.create_line(*flat_line, fill=color, width=2, smooth=True)
+            width = 2 + int(band_level * 3)
+            canvas.create_line(*flat_line, fill=color, width=width, smooth=True)
         except Exception:
             pass
 
+    # Оверлей с текущими уровнями (можно убрать, если мешает)
+    # _draw_band_meters(canvas, w, h, bass, mid, high)
 
-def _draw_spectrum(canvas, w, h, amps, t):
+
+def _draw_spectrum(canvas, w, h, amps, t, bass, mid, high):
+    """Столбики эквалайзера. Реагируют на реальный спектр."""
     n = len(amps)
     bar_w = w / n
+
     for i in range(n):
         a = amps[i]
         bar_h = max(4, int(a * h * 0.85))
@@ -562,14 +813,19 @@ def _draw_spectrum(canvas, w, h, amps, t):
         canvas.create_rectangle(x1, y1, x2, y1 + 3, fill=top_color, outline="")
 
 
-def _draw_circles(canvas, w, h, amps, t):
+def _draw_circles(canvas, w, h, amps, t, bass, mid, high):
+    """Круги от центра. Реальный пульс по басам."""
     cx, cy = w // 2, h // 2
     max_r = min(w, h) * 0.45
 
+    # Реакция кругов на полосы частот
+    band_levels = [bass, mid, high, bass, mid]
+
     for layer in range(5):
-        idx = int(layer * len(amps) / 5)
-        a = amps[idx] if idx < len(amps) else 0
-        radius = int(max_r * (0.3 + layer * 0.15) * (0.6 + a * 0.4))
+        band = band_levels[layer % len(band_levels)]
+        # Пульс: размер круга зависит от уровня своей полосы
+        pulse = 0.5 + band * 0.9
+        radius = int(max_r * (0.25 + layer * 0.15) * pulse)
         if radius < 3:
             continue
 
@@ -582,15 +838,15 @@ def _draw_circles(canvas, w, h, amps, t):
         x2 = cx + radius
         y2 = cy + radius
 
+        width = max(2, 6 - layer)
         try:
-            canvas.create_oval(x1, y1, x2, y2,
-                               outline=color,
-                               width=max(2, 4 - layer))
+            canvas.create_oval(x1, y1, x2, y2, outline=color, width=width)
         except Exception:
             pass
 
-    a0 = amps[0] if amps else 0
-    core_r = int(20 + a0 * 40)
+    # Ядро — реагирует на бас
+    core_pulse = 0.5 + bass * 1.2
+    core_r = int(20 + core_pulse * 50)
     hue = t * 0.3 % 1.0
     r, g, b = _hsv_to_rgb(hue, 1.0, 1.0)
     color = f"#{r:02x}{g:02x}{b:02x}"
@@ -600,10 +856,25 @@ def _draw_circles(canvas, w, h, amps, t):
 
 
 def _change_vis_mode(api, mode):
+    """Сохраняет режим в конфиг и в StringVar, сразу перерисовывает."""
     if mode not in VIS_MODES:
         return
     _state["config"]["vis_mode"] = mode
     _save_config(api)
+    try:
+        vis_var = _state["ui"].get("vis_var")
+        if vis_var is not None:
+            vis_var.set(mode)
+    except Exception:
+        pass
+
+    canvas = _state["ui"].get("vis_canvas")
+    if canvas is not None:
+        try:
+            if canvas.winfo_exists():
+                _draw_vis(api, canvas)
+        except Exception:
+            pass
 
 
 def _set_sensitivity(api, value):
@@ -810,7 +1081,7 @@ def _enter_fullscreen(api, win):
 
     _state["fullscreen"] = True
 
-    # Скрываем нижний блок (плейлист + кнопки)
+    # Скрываем нижний блок (плейлист)
     bottom = ui.get("bottom_block")
     if bottom is not None:
         try:
@@ -840,7 +1111,7 @@ def _enter_fullscreen(api, win):
         except Exception:
             pass
 
-    # Скрываем верхнюю панель визуализации (переключатели)
+    # Скрываем верхнюю панель визуализации
     vis_top = ui.get("vis_top")
     if vis_top is not None:
         try:
@@ -848,7 +1119,6 @@ def _enter_fullscreen(api, win):
         except Exception:
             pass
 
-    # Холст — на весь размер
     vis_wrap = ui.get("vis_wrap")
     if vis_wrap is not None:
         try:
@@ -868,7 +1138,6 @@ def _enter_fullscreen(api, win):
         except Exception:
             pass
 
-    # Фуллскрин
     try:
         win.attributes("-fullscreen", True)
     except Exception:
@@ -909,7 +1178,7 @@ def _exit_fullscreen(api, win):
         except Exception:
             pass
 
-    # Возвращаем фон панели визуализации
+    # Фон панелей
     vis_panel = ui.get("vis_panel")
     if vis_panel is not None:
         try:
@@ -918,7 +1187,6 @@ def _exit_fullscreen(api, win):
         except Exception:
             pass
 
-    # vis_wrap
     vis_wrap = ui.get("vis_wrap")
     if vis_wrap is not None:
         try:
@@ -937,30 +1205,14 @@ def _exit_fullscreen(api, win):
         except Exception:
             pass
 
-    # Возвращаем верхнюю панель визуализации
-    vis_top = ui.get("vis_top")
-    if vis_top is not None:
-        try:
-            vis_top.pack(fill="x", padx=10, pady=(6, 2), before=vis_wrap)
-        except Exception:
-            pass
-
-    if vis_wrap is not None:
-        try:
-            vis_wrap.pack(fill="x", padx=10, pady=(4, 10))
-        except Exception:
-            pass
-
-    # Возвращаем панели в правильном порядке
-    order = [
+    # Возвращаем верхние панели
+    order_top = [
         ("top_bar",   {"fill": "x", "padx": 16, "pady": (10, 4)}),
         ("now_card",  {"fill": "x", "padx": 16, "pady": (4, 4)}),
         ("controls",  {"pady": (6, 4)}),
         ("vol_row",   {"fill": "x", "padx": 16, "pady": (4, 6)}),
-        ("vis_panel", {"fill": "x", "padx": 16, "pady": (4, 4)}),
-        ("head_row",  {"fill": "x", "padx": 16, "pady": (6, 2)}),
     ]
-    for key, opts in order:
+    for key, opts in order_top:
         w = ui.get(key)
         if w is not None:
             try:
@@ -969,7 +1221,40 @@ def _exit_fullscreen(api, win):
             except Exception:
                 pass
 
-    # Возвращаем нижний блок (плейлист)
+    # Панель визуализации
+    if vis_panel is not None:
+        try:
+            vis_panel.pack_forget()
+            vis_panel.pack(fill="x", padx=16, pady=(4, 4))
+        except Exception:
+            pass
+
+    # Сначала верхняя строка визуализации, потом холст
+    vis_top = ui.get("vis_top")
+    if vis_top is not None:
+        try:
+            vis_top.pack_forget()
+            vis_top.pack(fill="x", padx=10, pady=(6, 2))
+        except Exception:
+            pass
+
+    if vis_wrap is not None:
+        try:
+            vis_wrap.pack_forget()
+            vis_wrap.pack(fill="x", padx=10, pady=(4, 10))
+        except Exception:
+            pass
+
+    # Заголовок «Плейлист»
+    head_row = ui.get("head_row")
+    if head_row is not None:
+        try:
+            head_row.pack_forget()
+            head_row.pack(fill="x", padx=16, pady=(6, 2))
+        except Exception:
+            pass
+
+    # Нижний блок
     bottom = ui.get("bottom_block")
     if bottom is not None:
         try:
@@ -984,7 +1269,6 @@ def _exit_fullscreen(api, win):
 # ============================================================
 
 def _open_requires_update_window(api):
-    """Показывает окно: обновите Deskify до 1.2, чтобы плеер работал."""
     ctk = api["ctk"]
     app = api["app"]
 
@@ -1003,11 +1287,9 @@ def _open_requires_update_window(api):
     except Exception:
         pass
 
-    # Заголовок
     ctk.CTkLabel(win, text="🎵 Музыкальный плеер недоступен",
                  font=ctk.CTkFont(size=17, weight="bold")).pack(pady=(24, 8))
 
-    # Сообщение
     ctk.CTkLabel(
         win,
         text=("Для работы музыкального плеера нужна библиотека pygame.\n\n"
@@ -1020,7 +1302,6 @@ def _open_requires_update_window(api):
         font=ctk.CTkFont(size=12),
     ).pack(padx=30, pady=(0, 14))
 
-    # Кнопки
     btns = ctk.CTkFrame(win, fg_color="transparent")
     btns.pack(pady=(0, 20))
 
@@ -1053,7 +1334,6 @@ def _open_requires_update_window(api):
 # ============================================================
 
 def _open_player_window(api):
-    # Проверка pygame
     if not HAS_PYGAME:
         _open_requires_update_window(api)
         return
@@ -1196,6 +1476,7 @@ def _open_player_window(api):
                  font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(0, 6))
 
     vis_var = ctk.StringVar(value=_state["config"].get("vis_mode", "Волны"))
+    _state["ui"]["vis_var"] = vis_var
     ctk.CTkOptionMenu(vis_top, variable=vis_var, values=VIS_MODES, width=130,
                       command=lambda v: _change_vis_mode(api, v)).pack(side="left", padx=4)
 
@@ -1235,7 +1516,6 @@ def _open_player_window(api):
     pl_count.pack(side="right")
     _state["ui"]["pl_count"] = pl_count
 
-    # Нижний блок — контейнер плейлиста и кнопок
     bottom_block = ctk.CTkFrame(win, fg_color="transparent")
     bottom_block.pack(fill="both", expand=True, padx=16, pady=(0, 12))
     _state["ui"]["bottom_block"] = bottom_block
@@ -1332,7 +1612,6 @@ def _open_player_window(api):
 
     win.bind("<KeyPress>", on_key)
 
-    # Оверлей для подсказок
     hint_lbl = ctk.CTkLabel(win, text="", text_color="white",
                              fg_color="#000000", corner_radius=8,
                              font=ctk.CTkFont(size=13, weight="bold"))
