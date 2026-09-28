@@ -75,7 +75,7 @@
       "name": "Музыкальный плеер",
       "author": "Deskify",
       "description": "Локальный музыкальный плеер: mp3, flac, wav, плейлист, повтор.",
-      "version": "2.1.0",
+      "version": "2.1.5",
       "icon": "🎵",
       "file": "music.py",
       "tags": [
