@@ -1,19 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Магазин плагинов Deskify (v2.0).
+Магазин плагинов Deskify (v3.0).
 
 Возможности:
-  - загрузка каталога из raw-URL GitHub с фолбэком в кэш;
+  - каталог из raw-URL GitHub с фолбэком в кэш;
   - установка / обновление / удаление плагинов из каталога;
-  - вкладка «Локальные» — все .py в data/plugins/, включая поставленные вручную;
-  - удаление любого локального плагина с бэкапом в .trash/;
-  - индикатор загрузки на кнопке;
-  - проверка обновлений по номеру версии (1.0 == 1.0.0);
-  - поиск по каталогу и по локальным;
-  - фильтр по тегам;
-  - открытие папки плагинов в проводнике.
-
-sha256 НЕ проверяется.
+  - «Обновить всё» одной кнопкой и проверка обновлений при запуске;
+  - установка из локального .py-файла и по ссылке (в том числе со страницы GitHub);
+  - отключение плагина без удаления и обратное включение;
+  - корзина: восстановление удалённых и заменённых плагинов;
+  - вкладка «Локальные» — все .py в data/plugins/;
+  - поиск и фильтр по тегам, индикатор загрузки;
+  - сравнение версий (1.0 == 1.0.0), открытие папки плагинов.
 
 Каталог по умолчанию: https://github.com/deskify/Plugins
 """
@@ -24,7 +22,10 @@ import shutil
 import threading
 import urllib.request
 import urllib.error
+import re
 import ssl
+import time
+from urllib.parse import urlparse, unquote
 import webbrowser
 from datetime import datetime
 
@@ -43,6 +44,7 @@ CACHE_FILENAME = "store_cache.json"
 INSTALLED_VERSIONS_FILENAME = "installed_plugin_versions.json"
 
 TRASH_DIRNAME = ".trash"
+DISABLED_SUFFIX = ".disabled"
 
 
 _state = {
@@ -56,6 +58,7 @@ _state = {
     "active_tag": None,
     "active_tab": "catalog",     # catalog | installed | local
     "installed_versions": {},
+    "after_refresh": None,
 }
 
 
@@ -233,7 +236,7 @@ def _heal_installed_versions(api, catalog):
 def _fetch_url(url, timeout=10):
     ctx = ssl.create_default_context()
     req = urllib.request.Request(
-        url, headers={"User-Agent": "Deskify-Plugin-Store/2.0"}
+        url, headers={"User-Agent": "Deskify-Plugin-Store/3.0"}
     )
     with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
         return resp.read()
@@ -748,6 +751,18 @@ def _render_installed_tab(api, frame):
         btn_box = ctk.CTkFrame(card, fg_color="transparent")
         btn_box.pack(side="right", padx=10, pady=8)
 
+        def mk_off(fn=filename):
+            def do():
+                ok, msg = _disable_plugin(api, fn)
+                api["toast"](msg, "success" if ok else "error")
+                _refresh_all(api)
+            return do
+
+        if filename != _self_filename():
+            ctk.CTkButton(btn_box, text="⏸ Отключить", width=110,
+                          fg_color="gray30",
+                          command=mk_off()).pack(pady=2)
+
         def mk_del(fn=filename):
             def do():
                 if not api["messagebox"].askyesno(
@@ -894,6 +909,17 @@ def _refresh_all(api):
         _render_installed_tab(api, list_frame)
     elif tab == "local":
         _render_local_tab(api, list_frame)
+    elif tab == "disabled":
+        _render_disabled_tab(api, list_frame)
+    elif tab == "trash":
+        _render_trash_tab(api, list_frame)
+
+    cb = _state.get("after_refresh")
+    if cb:
+        try:
+            cb()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -990,17 +1016,369 @@ def _close_window(win):
 #  Перезагрузка плагинов
 # ============================================================
 
+# ============================================================
+#  Отключение / включение плагинов
+# ============================================================
+
+def _self_filename():
+    try:
+        return os.path.basename(__file__)
+    except Exception:
+        return "store.py"
+
+
+def _disabled_plugin_files(api):
+    pd = api["PathHelper"].plugins_dir()
+    try:
+        return sorted(f for f in os.listdir(pd)
+                      if f.endswith(".py" + DISABLED_SUFFIX))
+    except Exception:
+        return []
+
+
+def _disable_plugin(api, filename):
+    """Переименовывает x.py в x.py.disabled: приложение его не загружает, файл остаётся."""
+    if filename == _self_filename():
+        return False, "Магазин нельзя отключить из самого магазина"
+    pd = api["PathHelper"].plugins_dir()
+    src = os.path.join(pd, filename)
+    dst = src + DISABLED_SUFFIX
+    if not os.path.exists(src):
+        return False, "Файл не найден"
+    try:
+        if os.path.exists(dst):
+            os.remove(dst)
+        os.replace(src, dst)
+    except Exception as e:
+        return False, f"Не удалось отключить: {e}"
+    return True, f"«{filename}» отключён. Перезагрузите плагины."
+
+
+def _enable_plugin(api, disabled_name):
+    pd = api["PathHelper"].plugins_dir()
+    src = os.path.join(pd, disabled_name)
+    dst = src[:-len(DISABLED_SUFFIX)]
+    if not os.path.exists(src):
+        return False, "Файл не найден"
+    if os.path.exists(dst):
+        return False, "В data/plugins/ уже есть файл с таким именем"
+    try:
+        os.replace(src, dst)
+    except Exception as e:
+        return False, f"Не удалось включить: {e}"
+    return True, f"«{os.path.basename(dst)}» включён. Перезагрузите плагины."
+
+
+# ============================================================
+#  Корзина
+# ============================================================
+
+def _trash_items(api):
+    d = _trash_dir(api)
+    try:
+        names = os.listdir(d)
+    except Exception:
+        return []
+    items = []
+    for n in names:
+        path = os.path.join(d, n)
+        if not os.path.isfile(path):
+            continue
+        base, _, ts = n.rpartition(".")
+        if not base.endswith(".py"):
+            base, ts = n, ""
+        when = ""
+        try:
+            when = datetime.strptime(ts, "%Y%m%d_%H%M%S").strftime("%d.%m.%Y %H:%M")
+        except Exception:
+            pass
+        items.append({"trash_name": n, "filename": base, "when": when,
+                      "path": path, "mtime": os.path.getmtime(path)})
+    items.sort(key=lambda i: i["mtime"], reverse=True)
+    return items
+
+
+def _restore_from_trash(api, item):
+    pd = api["PathHelper"].plugins_dir()
+    target = os.path.join(pd, item["filename"])
+    try:
+        if os.path.exists(target):
+            _backup_file(api, item["filename"])
+        shutil.copy2(item["path"], target)
+        os.remove(item["path"])
+    except Exception as e:
+        return False, f"Не удалось восстановить: {e}"
+    return True, f"«{item['filename']}» восстановлен. Перезагрузите плагины."
+
+
+def _delete_from_trash(api, item):
+    try:
+        os.remove(item["path"])
+        return True, "Удалено навсегда"
+    except Exception as e:
+        return False, f"Не удалось удалить: {e}"
+
+
+def _empty_trash(api):
+    n = 0
+    for it in _trash_items(api):
+        try:
+            os.remove(it["path"])
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+# ============================================================
+#  Установка из файла / по ссылке
+# ============================================================
+
+def _write_plugin(api, filename, raw):
+    filename = re.sub(r"[^\w.\-]", "_", os.path.basename(filename)) or "plugin.py"
+    if not filename.endswith(".py"):
+        filename += ".py"
+    target = os.path.join(api["PathHelper"].plugins_dir(), filename)
+    if os.path.exists(target):
+        _backup_file(api, filename)
+    try:
+        with open(target, "wb") as f:
+            f.write(raw)
+    except Exception as e:
+        return False, f"Не удалось записать файл: {e}"
+    return True, f"Плагин «{filename}» установлен. Перезагрузите плагины."
+
+
+def _check_plugin_text(raw):
+    try:
+        text = raw.decode("utf-8")
+    except Exception:
+        return "Файл не является текстом UTF-8"
+    if "<html" in text[:200].lower():
+        return "Получен HTML, а не Python"
+    if "def register" not in text:
+        return "В файле нет функции register(api): это не плагин Deskify"
+    return None
+
+
+def _install_from_file(api, path):
+    if not path.lower().endswith(".py"):
+        return False, "Нужен файл .py"
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except Exception as e:
+        return False, f"Не удалось прочитать файл: {e}"
+    err = _check_plugin_text(raw)
+    if err:
+        return False, err
+    return _write_plugin(api, os.path.basename(path), raw)
+
+
+def _normalize_plugin_url(url):
+    """Ссылку на страницу файла GitHub (/blob/) превращает в прямую (raw)."""
+    url = url.strip()
+    m = re.match(r"^https?://github\.com/([^/]+)/([^/]+)/blob/(.+)$", url)
+    if m:
+        return f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/{m.group(3)}"
+    return url
+
+
+def _install_from_url(api, url):
+    url = _normalize_plugin_url(url)
+    if not url.startswith(("http://", "https://")):
+        return False, "Нужна ссылка, начинающаяся с http:// или https://"
+    timeout = int(_load_store_config(api).get("timeout", 10))
+    try:
+        raw = _fetch_url(url, timeout=timeout)
+    except Exception as e:
+        return False, f"Не удалось скачать: {_humanize_network_error(e)}"
+    err = _check_plugin_text(raw)
+    if err:
+        return False, err
+    name = unquote(os.path.basename(urlparse(url).path)) or "plugin.py"
+    return _write_plugin(api, name, raw)
+
+
+# ============================================================
+#  Обновления
+# ============================================================
+
+def _pending_updates(api, catalog=None):
+    """Плагины из каталога, которые установлены и у которых в каталоге версия новее."""
+    if catalog is None:
+        catalog = _state["catalog"]
+    installed = _installed_plugin_files(api)
+    result = []
+    for p in catalog or []:
+        if not isinstance(p, dict):
+            continue
+        pid = p.get("id") or ""
+        if not pid or not _is_file_installed(p, installed):
+            continue
+        cur = _state["installed_versions"].get(pid)
+        if cur is not None and _is_newer(cur, p.get("version", "")):
+            result.append(p)
+    return result
+
+
+def _update_all(api, plugins):
+    done, errors = 0, []
+    for p in plugins:
+        ok, msg = _install_plugin(api, p)
+        if ok:
+            done += 1
+        else:
+            errors.append(f"{p.get('name', p.get('id'))}: {msg}")
+    return done, errors
+
+
+def _startup_update_check(api):
+    """Один раз за запуск, в фоне: если есть обновления, показывает уведомление."""
+    app = api["app"]
+    if getattr(app, "_store_update_checked", False):
+        return
+    app._store_update_checked = True
+    if not _load_store_config(api).get("check_updates_on_start", True):
+        return
+
+    def worker():
+        try:
+            time.sleep(4)
+            plugins, source, _err = _load_catalog(api)
+            if source != "online":
+                return
+            _state["installed_versions"] = _load_installed_versions(api)
+            _heal_installed_versions(api, plugins)
+            pending = _pending_updates(api, plugins)
+        except Exception:
+            return
+        if pending:
+            n = len(pending)
+            try:
+                app.after(0, lambda: api["toast"](
+                    f"Есть обновления плагинов: {n}. Откройте магазин.", "info"))
+            except Exception:
+                pass
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+# ============================================================
+#  Вкладки «Отключённые» и «Корзина»
+# ============================================================
+
+def _render_disabled_tab(api, frame):
+    ctk = api["ctk"]
+    files = _disabled_plugin_files(api)
+    if not files:
+        ctk.CTkLabel(frame, text="Отключённых плагинов нет.",
+                     text_color="gray60").pack(pady=40)
+        return
+    for f in files:
+        real = f[:-len(DISABLED_SUFFIX)]
+        card = ctk.CTkFrame(frame, corner_radius=8)
+        card.pack(fill="x", padx=4, pady=5)
+        ctk.CTkLabel(card, text="⏸", font=ctk.CTkFont(size=24)).pack(
+            side="left", padx=(12, 6), pady=10)
+        ctk.CTkLabel(card, text=real, anchor="w",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(
+            side="left", fill="x", expand=True, padx=4)
+
+        def mk_on(fn=f):
+            def do():
+                ok, msg = _enable_plugin(api, fn)
+                api["toast"](msg, "success" if ok else "error")
+                _refresh_all(api)
+            return do
+
+        ctk.CTkButton(card, text="▶ Включить", width=110,
+                      command=mk_on()).pack(side="right", padx=10, pady=8)
+
+
+def _render_trash_tab(api, frame):
+    ctk = api["ctk"]
+    items = _trash_items(api)
+    if not items:
+        ctk.CTkLabel(frame, text="Корзина пуста.",
+                     text_color="gray60").pack(pady=40)
+        return
+
+    head = ctk.CTkFrame(frame, fg_color="transparent")
+    head.pack(fill="x", padx=4, pady=(2, 4))
+    ctk.CTkLabel(head, text=f"Файлов: {len(items)}",
+                 text_color="gray60").pack(side="left")
+
+    def clear():
+        if not api["messagebox"].askyesno(
+                "Корзина", "Удалить все файлы из корзины навсегда?"):
+            return
+        n = _empty_trash(api)
+        api["toast"](f"Удалено файлов: {n}", "success")
+        _refresh_all(api)
+
+    ctk.CTkButton(head, text="🗑 Очистить корзину", width=160,
+                  fg_color="#c0392b", hover_color="#e74c3c",
+                  command=clear).pack(side="right")
+
+    for it in items:
+        card = ctk.CTkFrame(frame, corner_radius=8)
+        card.pack(fill="x", padx=4, pady=5)
+        info = ctk.CTkFrame(card, fg_color="transparent")
+        info.pack(side="left", fill="both", expand=True, padx=12, pady=8)
+        ctk.CTkLabel(info, text=it["filename"], anchor="w",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(anchor="w")
+        if it["when"]:
+            ctk.CTkLabel(info, text=f"Сохранён: {it['when']}", anchor="w",
+                         text_color="gray60",
+                         font=ctk.CTkFont(size=11)).pack(anchor="w")
+
+        def mk_restore(item=it):
+            def do():
+                ok, msg = _restore_from_trash(api, item)
+                api["toast"](msg, "success" if ok else "error")
+                _refresh_all(api)
+            return do
+
+        def mk_forever(item=it):
+            def do():
+                if not api["messagebox"].askyesno(
+                        "Корзина", f"Удалить «{item['filename']}» навсегда?"):
+                    return
+                ok, msg = _delete_from_trash(api, item)
+                api["toast"](msg, "success" if ok else "error")
+                _refresh_all(api)
+            return do
+
+        ctk.CTkButton(card, text="✕", width=36, fg_color="#c0392b",
+                      hover_color="#e74c3c",
+                      command=mk_forever()).pack(side="right", padx=(0, 10), pady=8)
+        ctk.CTkButton(card, text="↩ Восстановить", width=140,
+                      command=mk_restore()).pack(side="right", padx=4, pady=8)
+
+
+# ============================================================
+#  Перезагрузка плагинов
+# ============================================================
+
 def _reload_plugins(api):
     app = api["app"]
     try:
-        pf = getattr(app, "plugins_frame", None)
-        if pf is not None:
-            for w in list(pf.winfo_children()):
-                try:
-                    w.destroy()
-                except Exception:
-                    pass
-        app._load_plugins()
+        fn = api.get("reload_plugins")
+        if callable(fn):
+            fn()
+        else:
+            pf = getattr(app, "plugins_frame", None)
+            if pf is not None:
+                for w in list(pf.winfo_children()):
+                    try:
+                        w.destroy()
+                    except Exception:
+                        pass
+            reg = getattr(app, "plugin_registry", None)
+            if isinstance(reg, list):
+                reg.clear()
+            app._load_plugins()
         api["toast"]("Плагины перезагружены", "success")
         api["notify"]("Магазин плагинов", "Плагины перезагружены.")
     except Exception as e:
@@ -1117,6 +1495,141 @@ def _open_store_window(api):
     ctk.CTkButton(btn_row, text="🔗 Репозиторий", width=130, fg_color="gray30",
                   command=lambda: _open_repo(api)).pack(side="left", padx=3)
 
+    # ---------- Вторая строка: обновления и ручная установка ----------
+    btn_row2 = ctk.CTkFrame(win, fg_color="transparent")
+    btn_row2.pack(fill="x", padx=16, pady=(0, 6))
+
+    upd_btn = ctk.CTkButton(btn_row2, text="⬆ Обновить всё", width=170,
+                            fg_color="#219150", hover_color="#27ae60")
+    upd_btn.pack(side="left", padx=(0, 6))
+
+    def refresh_update_btn():
+        try:
+            n = len(_pending_updates(api))
+            if n:
+                upd_btn.configure(text=f"⬆ Обновить всё ({n})", state="normal")
+            else:
+                upd_btn.configure(text="✓ Всё актуально", state="disabled")
+        except Exception:
+            pass
+
+    def do_update_all():
+        pending = _pending_updates(api)
+        if not pending:
+            return
+        upd_btn.configure(state="disabled", text="Обновление...")
+
+        def worker():
+            n, errs = _update_all(api, pending)
+
+            def apply():
+                try:
+                    _refresh_all(api)
+                    if errs:
+                        api["messagebox"].showerror("Обновление", "\n".join(errs))
+                    if n:
+                        api["toast"](f"Обновлено плагинов: {n}", "success")
+                        if api["messagebox"].askyesno(
+                                "Обновление", "Перезагрузить плагины сейчас?"):
+                            _reload_plugins(api)
+                except Exception:
+                    pass
+            app.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    upd_btn.configure(command=do_update_all)
+    _state["after_refresh"] = refresh_update_btn
+
+    def _warn_unsafe_install(source_line, on_confirm):
+        """Предупреждение перед установкой плагина не из каталога: это может быть вирус."""
+        dlg = ctk.CTkToplevel(win)
+        dlg.title("Внимание")
+        dlg.geometry("440x300")
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.grab_set()
+
+        ctk.CTkLabel(dlg, text="⚠ Будьте осторожны",
+                     font=ctk.CTkFont(size=18, weight="bold"),
+                     text_color="#e67e22").pack(padx=20, pady=(20, 6), anchor="w")
+        text = (
+            "Вы устанавливаете плагин не из каталога, а " + source_line + ".\n\n"
+            "Код плагина выполняется внутри Deskify с теми же правами, что и сама "
+            "программа. Он может читать и изменять ваши файлы, обращаться в интернет "
+            "и выполнять произвольный код. Проверка на вирусы не выполняется.\n\n"
+            "Устанавливайте только то, в чём уверены."
+        )
+        ctk.CTkLabel(dlg, text=text, wraplength=400, justify="left").pack(
+            padx=20, pady=(0, 10), anchor="w")
+
+        row = ctk.CTkFrame(dlg, fg_color="transparent")
+        row.pack(fill="x", padx=20, pady=(6, 18), side="bottom")
+
+        def confirm():
+            dlg.destroy()
+            on_confirm()
+
+        ctk.CTkButton(row, text="Отмена", width=110, fg_color="gray30",
+                      command=dlg.destroy).pack(side="left")
+        ctk.CTkButton(row, text="Я знаю что я делаю!", width=190,
+                      fg_color="#c0392b", hover_color="#e74c3c",
+                      command=confirm).pack(side="right")
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+
+    def add_from_file():
+        _safe_unset_topmost(win)
+        path = api["filedialog"].askopenfilename(
+            title="Выберите плагин (.py)", filetypes=[("Python", "*.py")])
+        if not path:
+            return
+
+        def do_install():
+            ok, msg = _install_from_file(api, path)
+            api["toast"](msg, "success" if ok else "error")
+            _refresh_all(api)
+
+        _warn_unsafe_install("загружаете его из файла на своём компьютере", do_install)
+
+    def add_from_url():
+        _safe_unset_topmost(win)
+        dlg = ctk.CTkInputDialog(
+            text="Ссылка на файл плагина (.py).\nМожно вставить и обычную ссылку на файл GitHub.",
+            title="Установка по ссылке")
+        url = (dlg.get_input() or "").strip()
+        if not url:
+            return
+
+        def do_install():
+            def worker():
+                ok, msg = _install_from_url(api, url)
+
+                def apply():
+                    try:
+                        api["toast"](msg, "success" if ok else "error")
+                        _refresh_all(api)
+                    except Exception:
+                        pass
+                app.after(0, apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        _warn_unsafe_install("скачиваете его по ссылке " + url, do_install)
+
+    ctk.CTkButton(btn_row2, text="➕ Из файла", width=120, fg_color="gray30",
+                  command=add_from_file).pack(side="left", padx=3)
+    ctk.CTkButton(btn_row2, text="🌐 По ссылке", width=120, fg_color="gray30",
+                  command=add_from_url).pack(side="left", padx=3)
+
+    chk_var = ctk.BooleanVar(value=bool(cfg.get("check_updates_on_start", True)))
+
+    def save_chk():
+        cfg["check_updates_on_start"] = bool(chk_var.get())
+        _save_store_config(api, cfg)
+
+    ctk.CTkCheckBox(btn_row2, text="Проверять обновления при запуске",
+                    variable=chk_var, command=save_chk).pack(side="left", padx=12)
+
     # ---------- Список ----------
     list_frame = ctk.CTkScrollableFrame(win, fg_color=("gray90", "gray15"))
     list_frame.pack(fill="both", expand=True, padx=16, pady=(4, 12))
@@ -1138,8 +1651,10 @@ def _open_store_window(api):
 
     for key, label in [("catalog", "🌐 Каталог"),
                        ("installed", "⭐ Установленные"),
-                       ("local", "📁 Локальные")]:
-        b = ctk.CTkButton(tabs_row, text=label, width=170, height=32,
+                       ("local", "📁 Локальные"),
+                       ("disabled", "⏸ Отключённые"),
+                       ("trash", "🗑 Корзина")]:
+        b = ctk.CTkButton(tabs_row, text=label, width=140, height=32,
                           fg_color="transparent",
                           command=lambda k=key: select_tab(k))
         b.pack(side="left", padx=2)
@@ -1199,3 +1714,4 @@ def register(api):
         "🛒 Магазин плагинов",
         lambda: _open_store_window(api),
     )
+    _startup_update_check(api)
